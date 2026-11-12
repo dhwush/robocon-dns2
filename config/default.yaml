@@ -1,0 +1,48 @@
+mode: basic
+cube_size: 0.35
+field_length: 2.0
+field_width: 1.2
+# 视线距离。近于 0.05 m 或远于 1.2 m 的深度在进画面时丢掉。
+# 1.2 m 留下水平约 0.8 m 内的方块，3 m 外的白板不再参与识别。
+depth_min: 0.05
+depth_max: 1.2
+# 深度流 848×480，最近大约 0.17 米。1280×720 大约 0.28 米以内没有深度。对齐到彩色后仍用彩色内参。
+depth_width: 848
+depth_height: 480
+flying_pixel_m: 0.08
+# 地面由重力和相机高度给出，深度只在上下 12 cm 里修正。内点 15 mm。
+ground_ransac_thresh: 0.015
+ground_ransac_iterations: 50
+ground_stride: 8
+ground_max_angle_deg: 8.0
+ground_prior_window: 0.12
+ground_min_points: 150
+# 小车在地面时彩色光心离地 0.669 m。在 600 mm 平台上时用 --on-platform，变成 1.269 m。
+camera_height: 0.669
+platform_lift: 0.6
+min_face_pixels: 400
+min_footprint_fraction: 0.45
+# 0.35 m 白盒近处长边容差用满这个值。
+size_tolerance: 0.06
+frames_to_fuse: 15
+min_samples: 5
+output_hz: 10
+hold_s: 0.5
+jump_m: 0.03
+fps: 30
+light: daylight
+# 1 档用原来的第 2 档，5 档用原来的第 4 档。3 档室内不动。2、4 档取相邻两档的正中。
+light_levels:
+  bright: {exposure: 50, gain: 16, brightness: 0}
+  daylight: {exposure: 100, gain: 22, brightness: 0}
+  indoor: {exposure: 150, gain: 28, brightness: 0}
+  dim: {exposure: 275, gain: 38, brightness: 6}
+  dark: {exposure: 400, gain: 48, brightness: 12}
+hsv_calib_frames: 30
+hsv_path: config/hsv.yaml
+# 白盒：色相不限，饱和度不超过 110，明度不低于 140。正面发灰也算白。没有正面色。
+colors:
+  - name: white
+    hsv_low: [0, 0, 140]
+    hsv_high: [180, 110, 255]
+    front: false

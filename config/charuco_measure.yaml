@@ -1,0 +1,21 @@
+# 所有长度为米。棋盘原点：文字正向看，棋盘外框左上角；x右、y下、z向板背面。
+squares: [8, 6]
+square_length: 0.030
+marker_length: 0.022
+board1_ids: [0, 24]   # 左闭右开
+board2_ids: [40, 64]
+min_corners: 8
+max_reprojection_px: 2.0
+# 推定值：A4中心到定位顶角(+125,-168.5,+3)mm，顶角到几何中心(-100,+100,+100)mm。
+# 需要实物核实图案方向、3mm厚度方向。未知的2mm纸/棋盘偏移暂置零。
+cube_center_from_board_center: [0.025, -0.0685, 0.103]
+board_center_to_a4_center: [0.0, 0.0, 0.0]
+cube_mount_confirmed: false
+# 双板法：p_car = R_car_board2 @ p_board2 + t_car_board2。
+# t 是棋盘外框左上角在小车右前角系中的位置；不能直接填A4中心坐标。
+R_car_board2: null
+t_car_board2: null
+# 无双板安装参数时使用项目现有相机外参，要求RealSense有效重力。
+# cube/cap_pose.py 的常量是-211mm，与其注释的“右侧”冲突，需实机核实。
+optical_origin_car: [-0.211, 0.050, 0.669]
+camera_mount_confirmed: false

@@ -1,0 +1,17 @@
+# 单台文件，序列号 244622071936。实机按接上的号码从 config/cameras.yaml 取，不读这一份。
+# D435i serial 244622071936, color factory intrinsics at 1280x720.
+# From 20261005_144558/pose_log.txt (Camera 2, Task 1). Depth on the same unit
+# was checked separately. Aligned frames deproject with this color K.
+# Depth factory K is not used: 848x480, fx = fy = 424.8183,
+# cx = 427.2441, cy = 235.5571, depth_scale = 0.001 m (cloud_check.txt).
+# D400 color is rectified in the camera; the log has no distortion coefficients.
+width: 1280
+height: 720
+fx: 909.7513
+fy: 909.8418
+cx: 633.1354
+cy: 376.0774
+# brown: OpenCV forward model. inverse_brown_conrady: RealSense deproject model.
+distortion_model: inverse_brown_conrady
+# D = (k1, k2, p1, p2, k3)
+D: [0.0, 0.0, 0.0, 0.0, 0.0]
