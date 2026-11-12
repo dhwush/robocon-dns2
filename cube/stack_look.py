@@ -390,6 +390,41 @@ def _upper_face(pixels: np.ndarray, high: np.ndarray, depth: np.ndarray, intr, s
     return keep
 
 
+def _upper_metric_face(points, pixels, high, plane, shape, white):
+    """用白色区域关联稀疏几何点，近处侧面按米检查，输出仅含原有点。"""
+    keep = np.zeros(len(points), dtype=bool)
+    if int(high.sum()) < _MIN_WHITE:
+        return keep
+    patch = np.zeros(shape, np.uint8)
+    uv = pixels[high]
+    patch[uv[:, 1], uv[:, 0]] = 255
+    # 只跨过两像素的小深度孔洞；不能跨过非白色缝隙。
+    patch = cv2.morphologyEx(patch, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    patch = cv2.bitwise_and(patch, white)
+    _, labels = cv2.connectedComponents(patch)
+    ids = labels[uv[:, 1], uv[:, 0]]
+    for label in np.unique(ids):
+        if label == 0:
+            continue
+        chosen = np.flatnonzero(high)[ids == label]
+        if len(chosen) < _MIN_WHITE:
+            continue
+        cloud = points[chosen]
+        if not np.isfinite(cloud).all() or float(np.median(cloud[:, 2])) > .65:
+            continue
+        heights = plane.signed_distance(cloud)
+        height = float(np.ptp(np.percentile(heights, [5, 95])))
+        flat = plane.project(cloud)
+        centered = flat - np.median(flat, axis=0)
+        _, _, axes = np.linalg.svd(centered, full_matrices=False)
+        width = float(np.ptp(np.percentile(centered @ axes[0], [5, 95])))
+        thickness = float(np.ptp(np.percentile(centered @ axes[1], [5, 95])))
+        # 保留足够大的侧面片段；薄顶面、细白条和宽背景不算。
+        if .12 <= height <= .36 and .14 <= width <= .50 and thickness <= .12:
+            keep[chosen] = True
+    return keep
+
+
 def _empty_pixels() -> np.ndarray:
     return np.zeros((0, 2), dtype=int)
 
@@ -642,6 +677,7 @@ def _color_face_at(
     size_m: float,
     nearest: bool = False,
     diagnostics: dict | None = None,
+    white_metric: bool = False,
 ):
     """射线交到塔所在竖直面，检查高度、位置和完整面尺寸。"""
     ys, xs = np.nonzero(chosen)
@@ -665,6 +701,10 @@ def _color_face_at(
     # 面尺寸使用交点的当前相机深度，不能使用塔脚 z 或水平距离。
     face_distance = float(np.median(points[keep, 2]))
     liked = _like_face(mask, depth, intr, zmin, zmax, size_m, known_dist=face_distance)
+    if white_metric:
+        supported = _upper_metric_face(points, pixels, keep, plane, chosen.shape,
+                                       chosen.astype(np.uint8) * 255)
+        liked[ys[supported], xs[supported]] = 255
     if diagnostics is not None:
         diagnostics.update(face=int(np.count_nonzero(liked)), stage="face")
     if nearest:
@@ -764,26 +804,33 @@ def _rgb_cap_candidate(color_bgr, intr, plane, anchor, diagnostics):
 
 
 def _upper_white_by_color(color_bgr, depth, intr, plane, colors, zmin, zmax, anchor, distance, lower_uv):
-    """下层还在、上层没有深度时，只在下层白盒上方找白，用下层的距离放回 0.50 米以上。"""
+    """按下层或已保存的塔位置关联上层白；实测深度不得与射线明显矛盾。"""
     dist = _tower_distance(distance, anchor)
+    if dist is None and anchor is not None:
+        foot = plane.project(np.asarray(anchor).reshape(1, 3))[0]
+        horizontal = float(np.linalg.norm(foot - plane.origin()))
+        if np.isfinite(horizontal) and horizontal >= _MIN_RANGE_M:
+            dist = horizontal
     window = _above_lower_window(color_bgr.shape[:2], lower_uv, dist, intr)
-    if anchor is None or dist is None or window is None:
+    if anchor is None or dist is None:
         return None
     white = _white_pixels(color_bgr, colors) > 0
     usable = np.isfinite(depth) & (depth >= zmin) & (depth <= zmax)
+    # 下层出画时仍可用已记住的塔位置；高度与邻近约束在射线交点上检查。
+    chosen = white.copy() if window is None else white & window
+    ys, xs = np.nonzero(chosen)
+    if len(xs):
+        pixels = np.column_stack([xs, ys])
+        hits = _at_tower_face(pixels, intr, plane, anchor)
+        has = usable[ys, xs]
+        measured = deproject_pixels(pixels[has], depth[ys[has], xs[has]], intr)
+        # 有效深度也可参与颜色连通区域，但不能用投影覆盖明显矛盾的实测背景。
+        agrees = np.linalg.norm(measured - hits[has], axis=1) <= .10
+        chosen[ys[has][~agrees], xs[has][~agrees]] = False
     return _color_face_at(
-        white & ~usable & window,
-        depth,
-        intr,
-        plane,
-        anchor,
-        dist,
-        zmin,
-        zmax,
-        _UPPER_LO_M,
-        _UPPER_HI_M,
-        _BOX_SIZE_M,
-        nearest=True,
+        chosen, depth, intr, plane, anchor, dist, zmin, zmax,
+        _UPPER_LO_M, _UPPER_HI_M, _BOX_SIZE_M,
+        nearest=True, white_metric=True,
     )
 
 
@@ -894,7 +941,8 @@ def coarse_bands(
             high = _join_upper_seam(pixels, heights, near, color_bgr.shape[:2])
             top_support = (_upper_top_support(points, pixels, high, plane, color_bgr.shape[:2])
                            if looking_down else np.zeros(len(points), dtype=bool))
-            high = _upper_face(pixels, high, depth, intr, color_bgr.shape[:2], zmin, zmax) | top_support
+            metric = _upper_metric_face(points, pixels, high, plane, color_bgr.shape[:2], white)
+            high = _upper_face(pixels, high, depth, intr, color_bgr.shape[:2], zmin, zmax) | top_support | metric
         else:
             high = (heights > upper_lo) & (heights < _UPPER_HI_M) & near
         high = _closest_high(high, pixels, flat, found, plane, color_bgr.shape[:2])
@@ -917,7 +965,10 @@ def coarse_bands(
     colored = _cap_mask(color_bgr)
     colored[white > 0] = 0
     colored &= _cap_depth_mask(color_bgr, depth, intr, plane, found, rgb_debug)
-    colored = _cap_faces(colored, depth, intr, zmin, zmax)
+    red, blue = cap_color_masks(color_bgr)
+    colored = _cap_faces(colored, depth, intr, zmin, zmax,
+                         red=cv2.bitwise_and(red, colored),
+                         blue=cv2.bitwise_and(blue, colored), color_bgr=color_bgr)
     cap_points, cap_heights, cap_flat, cap_pixels = _cloud(colored, depth, intr, plane, zmin, zmax)
     if len(cap_points):
         band = (cap_heights > _CAP_LO_M) & (cap_heights < _CAP_HI_M) & _near(cap_flat, found, plane)
