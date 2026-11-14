@@ -826,6 +826,7 @@ def main() -> None:
     parser.add_argument("--config", default="config/default.yaml")
     parser.add_argument("--light", default=None)
     parser.add_argument("--camera-height", type=float, default=None)
+    parser.add_argument("--headless", action="store_true", help="SSH无窗口模式：终端输出俯仰、动作要求和识别结果，Ctrl+C退出")
     parser.add_argument("--competition", action="store_true", help="比赛简洁窗口：只显示俯仰、动作要求和识别结果")
     parser.add_argument("--diagnostics", nargs="?", const="auto", default=None,
                         metavar="DIR", help="保存原始帧和诊断信息；省略 DIR 时保存到 /tmp")
@@ -869,7 +870,8 @@ def main() -> None:
     attitude_was_valid = False
     cycle = RecognitionCycle()
     debug_window = DebugWindow()
-    debug_window.visible = not args.competition
+    debug_window.visible = not args.competition and not args.headless
+    last_terminal = -float("inf")
     debug_frame = 0
     debug_start = time.monotonic()
     try:
@@ -1208,6 +1210,17 @@ def main() -> None:
                     lines[0:0] = diagnostics.lines(diagnostic_state)
                 elif diagnostics.finished or diagnostics.error:
                     lines.insert(0, f"诊断采集{'失败' if diagnostics.error else '结束'}，已保存 {diagnostics.index} 帧")
+            if args.headless:
+                # 必须在任何绘图、Qt窗口、waitKey调用之前分流；xcb错误会直接中止进程。
+                if now - last_terminal >= 1.0 or cycle.restart:
+                    terminal_lines = competition_lines(search, pitch, cap_aim, watch.line, fallback, attitude_valid)
+                    print(" | ".join(terminal_lines), flush=True)
+                    if cycle.restart:
+                        print("本轮识别完成，保持低头位置，开始下一轮识别", flush=True)
+                    last_terminal = now
+                fps = 1.0 / max(now - last, 1e-3)
+                last = now
+                continue
             if args.competition:
                 lines = competition_lines(search, pitch, cap_aim, watch.line, fallback, attitude_valid)
                 vis = frame.color.copy()
@@ -1246,12 +1259,15 @@ def main() -> None:
                 source.set_color_lock(lock)
             fps = 1.0 / max(now - last, 1e-3)
             last = now
+    except KeyboardInterrupt:
+        pass
     finally:
         if diagnostics is not None:
             diagnostics.stop_trace()
             print(f"诊断已保存 {diagnostics.index} 帧：{diagnostics.path.resolve()}", flush=True)
         source.close()
-        cv2.destroyAllWindows()
+        if not args.headless:
+            cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

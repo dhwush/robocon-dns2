@@ -116,7 +116,8 @@ def test_display_overrides_stale_layers_and_cap_absence():
     assert '层数 2（白盒）；没有顶块' in lines
 
 
-def test_live_loop_switches_after_timeout_and_shows_top_result(monkeypatch):
+@pytest.mark.parametrize("headless", [False, True])
+def test_live_loop_switches_after_timeout_and_shows_top_result(monkeypatch, headless, capsys):
     import sys
     from types import SimpleNamespace
     import view_tower as view
@@ -129,6 +130,8 @@ def test_live_loop_switches_after_timeout_and_shows_top_result(monkeypatch):
         def __init__(self, *a, **k): pass
         def read(self):
             index[0] += 1
+            if headless and index[0] >= 8:
+                raise KeyboardInterrupt
             clock[0] = 0. if index[0] == 0 else 16. + index[0]*.1
             return Frame(color, depth, -plane.normal, gravity_status='fresh', gravity_age_s=.01)
         def close(self): pass
@@ -137,7 +140,7 @@ def test_live_loop_switches_after_timeout_and_shows_top_result(monkeypatch):
         def update(self, *a, **k): pass
         def close(self): pass
         def key(self, *a): pass
-    monkeypatch.setattr(sys, 'argv', ['view_tower.py'])
+    monkeypatch.setattr(sys, 'argv', ['view_tower.py'] + (['--headless'] if headless else []))
     monkeypatch.setattr(view, 'RealSenseSource', Source)
     monkeypatch.setattr(view, 'DebugWindow', Debug)
     monkeypatch.setattr(view, 'load_intrinsics', lambda *a: intr)
@@ -153,7 +156,21 @@ def test_live_loop_switches_after_timeout_and_shows_top_result(monkeypatch):
     monkeypatch.setattr(view.cv2,'imshow',lambda *a: None)
     monkeypatch.setattr(view.cv2,'destroyAllWindows',lambda: None)
     monkeypatch.setattr(view.cv2,'waitKey',lambda *a: ord('q') if index[0] >= 7 else -1)
+    if headless:
+        def forbidden(*a, **k):
+            raise AssertionError('无窗口模式不能调用绘图或GUI')
+        for name in ('imshow', 'namedWindow', 'resizeWindow', 'waitKey', 'destroyAllWindows'):
+            monkeypatch.setattr(view.cv2, name, forbidden)
+        monkeypatch.setattr(view, 'paint', forbidden)
+        monkeypatch.setattr(view, '_write', forbidden)
     view.main()
+    if headless:
+        output = capsys.readouterr().out
+        assert '当前俯仰' in output
+        assert '识别完成 白盒层数 2，没有顶块' in output
+        assert '开始下一轮识别' in output
+        assert not rendered
+        return
     assert not any('没有顶块' in line or '层数 1' in line for line in rendered[0])
     assert any('备用流程' in line for line in rendered[1])
     assert any('层数 2（白盒）；没有顶块' == line for line in rendered[-2])
