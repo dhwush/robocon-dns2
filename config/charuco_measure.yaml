@@ -6,15 +6,24 @@ board1_ids: [0, 24]   # 左闭右开
 board2_ids: [40, 64]
 min_corners: 8
 max_reprojection_px: 2.0
-# 推定值：A4中心到定位顶角(+125,-168.5,+3)mm，顶角到几何中心(-100,+100,+100)mm。
-# 需要实物核实图案方向、3mm厚度方向。未知的2mm纸/棋盘偏移暂置零。
-cube_center_from_board_center: [0.025, -0.0685, 0.103]
+# 用户确认：顶块边长200mm；最近顶角在纸中心左上；印刷面在顶块顶面上方3mm。
+# 纸中心到顶角(-125,-168.5,+3)mm，再到体心(+100,+100,+100)mm。
+cube_center_from_board_center: [-0.025, -0.0685, 0.103]
+# 按用户要求忽略棋盘中心与A4中心的2mm偏移。
 board_center_to_a4_center: [0.0, 0.0, 0.0]
-cube_mount_confirmed: false
-# 双板法：p_car = R_car_board2 @ p_board2 + t_car_board2。
-# t 是棋盘外框左上角在小车右前角系中的位置；不能直接填A4中心坐标。
-R_car_board2: null
-t_car_board2: null
+cube_mount_confirmed: true
+# 输出车系：原点为小车右前角，X右、Y前、Z上。
+# 图1 CAD轴X在图中向下、Y向右；摄像头/车前在图左侧。
+# 因此输出车系 = (-CAD_X,-CAD_Y,CAD_Z)。
+# 2号板文字正向看，纸下边朝摄像头：板X -> 车左，板Y -> 车前，板Z -> 车下。
+# A4中心在车系(-175,-134.8,570)mm；棋盘中心在板系(120,90,0)mm。
+# t = A4中心 - R @ 棋盘中心，必须使用棋盘左上角，不能直接填纸中心。
+R_car_board2:
+  - [-1.0, 0.0, 0.0]
+  - [0.0, 1.0, 0.0]
+  - [0.0, 0.0, -1.0]
+t_car_board2: [-0.055, -0.2248, 0.570]
+board2_mount_confirmed: true
 # 无双板安装参数时使用项目现有相机外参，要求RealSense有效重力。
 # cube/cap_pose.py 的常量是-211mm，与其注释的“右侧”冲突，需实机核实。
 optical_origin_car: [-0.211, 0.050, 0.669]

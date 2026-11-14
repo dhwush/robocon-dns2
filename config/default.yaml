@@ -28,6 +28,8 @@ frames_to_fuse: 15
 min_samples: 5
 output_hz: 10
 hold_s: 0.5
+# 同一目标塔顶精测持续失败后，转为低头检查第一层顶面。
+top_fallback_seconds: 15.0
 jump_m: 0.03
 fps: 30
 light: daylight

@@ -218,13 +218,13 @@ def test_cap_inside_the_frame_holds_even_off_center():
     assert lines[-3] == "层数 2，有红蓝塔顶"
     assert lines[-2] == "朝上是蓝色"
     assert lines[-1] == turned
-    parked = park_result(lines, "识别完成 层数 2 顶块红色")
+    parked = park_result(lines, "识别完成 层数 2 顶块红色", 35.0)
     assert parked[-3] == "层数 2，有红蓝塔顶"
     assert parked[-2] == "朝上是蓝色"
-    assert parked[-1] == "低头到 48.8 度"
+    assert parked[-1] == "低头 13.8 度，到低头 48.8 度；旋转停止"
     assert turned not in parked
     assert "识别完成，换下一个" not in parked
-    same = park_result(describe(search, high, 35.0, cap_aim="俯仰低头 6.0 度", cap_color="red"), "识别完成")
+    same = park_result(describe(search, high, 35.0, cap_aim="俯仰低头 6.0 度", cap_color="red"), "识别完成", 35.0)
     assert same[-1] == parked[-1]
     missing = cap_aim_text(None, intr, level)
     assert missing == "顶块这一眼看不出在不在画面里"
