@@ -1,6 +1,6 @@
 """深度预处理与 D435i 取流。
 
-几何计算按接上的序列号用表内彩色内参，不用设备当时读出的内参覆盖。
+几何计算使用实际启用的彩色流内参；深度已对齐到彩色。
 """
 
 from __future__ import annotations
@@ -8,9 +8,12 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 import threading
+import sys
 import time
 
 import numpy as np
+
+from geom.transform import Intrinsics
 
 
 # --- 一帧数据 -----------------------------------------------------------------
@@ -168,8 +171,31 @@ def list_camera_serials() -> list[str]:
     return serials
 
 
+def device_color_intrinsics(profile, rs) -> Intrinsics:
+    """读取实际启用的彩色流，转换成几何模块支持的内参模型。"""
+    raw = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+    coefficients = np.asarray(raw.coeffs, dtype=float)
+    values = np.asarray([raw.fx, raw.fy, raw.ppx, raw.ppy], dtype=float)
+    if (raw.width <= 0 or raw.height <= 0 or coefficients.shape != (5,)
+            or not np.isfinite(coefficients).all() or not np.isfinite(values).all()
+            or raw.fx <= 0 or raw.fy <= 0):
+        raise ValueError("设备彩色内参无效")
+    model = str(raw.model).split(".")[-1]
+    if not np.any(coefficients):
+        model = "none"
+    elif model in ("brown_conrady", "brown"):
+        model = "brown"
+    elif model != "inverse_brown_conrady":
+        raise ValueError(f"不支持设备彩色畸变模型 {model}，不能输出可靠坐标")
+    return Intrinsics(width=int(raw.width), height=int(raw.height),
+                      fx=float(raw.fx), fy=float(raw.fy), cx=float(raw.ppx), cy=float(raw.ppy),
+                      k1=float(coefficients[0]), k2=float(coefficients[1]),
+                      p1=float(coefficients[2]), p2=float(coefficients[3]),
+                      k3=float(coefficients[4]), distortion_model=model)
+
+
 class RealSenseSource:
-    """彩色与深度对齐。几何用的内参按这台的序列号从表里取，不用设备当时读出的数覆盖。"""
+    """彩色与深度对齐，内参从实际启用的彩色流读取。"""
 
     def __init__(
         self,
@@ -220,6 +246,8 @@ class RealSenseSource:
         self._config = config
         self._gyro_on = True
         self._open_pipeline()
+        # 后续重连仍打开这台设备，保持内参与图像来自同一台相机。
+        self._config.enable_device(self.serial)
         if serial is not None and self.serial != str(serial):
             self.close()
             raise RuntimeError(f"打开的相机是 {self.serial}，不是 {serial}")
@@ -259,6 +287,15 @@ class RealSenseSource:
             self._gyro_on = False
         device = self.profile.get_device()
         self.serial = str(device.get_info(rs.camera_info.serial_number))
+        try:
+            self.intrinsics = device_color_intrinsics(self.profile, rs)
+        except Exception:
+            self.pipeline.stop()
+            raise
+        intr = self.intrinsics
+        print(f"相机 {self.serial}：设备彩色内参 {intr.width}x{intr.height}，"
+              f"fx={intr.fx:.4f}, fy={intr.fy:.4f}, cx={intr.cx:.4f}, cy={intr.cy:.4f}，"
+              f"model={intr.distortion_model}, D={intr.D.tolist()}", file=sys.stderr, flush=True)
         self.depth_scale = np.float32(device.first_depth_sensor().get_depth_scale())
         self._accel_to_color = self._accel_rotation()
         if self._gyro_on:
@@ -299,7 +336,7 @@ class RealSenseSource:
             motion = self.profile.get_stream(stream).as_motion_stream_profile()
             color = self.profile.get_stream(self._rs.stream.color)
             ext = motion.get_extrinsics_to(color)
-            return np.array(ext.rotation, dtype=float).reshape(3, 3)
+            return np.array(ext.rotation, dtype=float).reshape(3, 3, order="F")
         except Exception:
             return np.eye(3)
 

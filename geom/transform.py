@@ -93,7 +93,7 @@ def projection_matrix(fx: float, fy: float, cx: float, cy: float, rotation: np.n
 
 
 # --- 已知内参 -----------------------------------------------------------------
-# fx、fy、cx、cy 和 D = (k1, k2, p1, p2, k3) 只从配置文件读取，运行时不改。
+# 内参可由设备读取或从离线文件加载，畸变系数 D = (k1, k2, p1, p2, k3)。
 
 @dataclass
 class Intrinsics:
@@ -135,7 +135,7 @@ def _intrinsics_from_raw(raw: dict, fx: float, fy: float, cx: float, cy: float) 
 
 
 def load_intrinsics(path: str | Path) -> Intrinsics:
-    # 读一份已经写明焦距和主点的文件。实机按序列号走 load_intrinsics_for_serial。
+    # 加载离线内参文件。任务2实时识别使用 RealSenseSource.intrinsics。
     with open(path, "r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle)
     return _intrinsics_from_raw(raw, raw["fx"], raw["fy"], raw["cx"], raw["cy"])
