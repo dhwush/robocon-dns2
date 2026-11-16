@@ -4,13 +4,13 @@
 窗口最下面写层数、红蓝朝上的颜色、俯仰还要怎么变。俯仰保持也在这下面。
 在抬头位置保持 15 秒未看到顶块，改为提示低头检查第一层顶面露出面积和上层遮挡；连续 5 帧确认白盒层数后，保持俯仰并自动开启下一轮识别。
 近处的抬头按下层白的水平距离，黄线顶到画面上沿再抬一点。
-有顶块并且层数已经定了，再写把顶块留在画面里还要转的俯仰和旋转。已经在画面里就保持。贴边超过 2 度写成 6 度。
+有顶块并且层数已经定了，再写把顶块留在画面里还要转的俯仰和旋转。已经在画面里就保持。贴边超过 3 度写成 6 度。
 青线是下层白，品红线是上层白，黄线是塔顶红蓝的轮廓。
 绿框是这一帧量准的塔顶方块。分界没量准时，用黄线离地更低的那条边当方块最底端，只在这一眼推算。正面内部对不上深度时，成直角的另一面留下当侧面，对不上的跳点才丢掉；两面都分不清这一眼不画。
 绿框的上下面必须和重力垂直。相机只在水平面里转，地面不会跟着斜。差过大约 3 度的这一帧不画，也不拿去平均。
 近处深度对不成平面时，白线是红蓝交界，橙线是方块外轮廓。黄线这时不画。体心仍交到离地 0.80 米。
 字直接写在画面上，不铺黑底。
-这座塔认完之后，窗口最下面按当前俯仰提示转到低头 48.8 度，误差不超过 2 度时提示停止。这是相对水平的角度，不按距离改。终端仍报层数、顶块颜色和最终方位。
+这座塔认完之后，窗口最下面按当前俯仰提示转到低头 48.8 度，误差不超过 3 度时提示停止。这是相对水平的角度，不按距离改。终端仍报层数、顶块颜色和最终方位。
 白盒层数只在先检查塔顶、再返回低头完成顶面检查后发布。有红蓝时要等体心和朝上的颜色一起稳定。
 绿框稳住满 10 秒仍分不清朝上的颜色，就用绿框上半区里更多的那一色。上沿出画还在抬头，这 10 秒照样计。绿框上半截已经出画时，看得见的是下色，朝上用另一色。
 有顶块时，报完返回低头 48.8 度后自动开启下一轮；无顶块时，返回低头确认白盒顶面和层数，保持俯仰自动开启下一轮。
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +37,7 @@ from PIL import Image, ImageDraw, ImageFont
 from tower_debug_window import DebugWindow
 from camera.source import RealSenseSource, color_lock_from_config
 from cube.aim import keep_in_frame
+from cube.body_frame import calibrate_cap, body_point
 from cube.pose_projection import pose_matches_color
 from cube.cap_pose import (
     CapFusion,
@@ -58,11 +60,23 @@ from cube.stack_look import (
     pitch_down_degrees,
     relax_upper_white,
 )
-from geom.transform import load_intrinsics
 from cube.top_fallback import TopFallback
 from ground.plane import Plane
 from main import GroundMemory, _prior_ground, clean_frame, load_config, selected_camera_height
 from view_cube_center import cube_wire_corners, draw_cube_edges, draw_center
+
+
+def configure_qt_fonts() -> None:
+    """Give OpenCV Qt a real font directory before creating any windows."""
+    configured = os.environ.get("QT_QPA_FONTDIR")
+    if configured and Path(configured).is_dir():
+        return
+    for directory in ("/usr/share/fonts/truetype/dejavu",
+                      "/usr/share/fonts/truetype/liberation",
+                      "/usr/share/fonts/truetype/freefont"):
+        if Path(directory).is_dir() and any(Path(directory).glob("*.ttf")):
+            os.environ["QT_QPA_FONTDIR"] = directory
+            return
 
 
 # 青：下层白。品红：上层白。黄：塔顶颜色轮廓。绿：量准的塔顶方块。
@@ -88,6 +102,7 @@ _LIGHT_TEXT = {
 }
 _CAP_SIZE = 0.20
 _CAP_REASON = {
+    "association": "候选与当前塔的位置或高度不符",
     "mask": "没圈成一块",
     "depth": "上面的深度太少",
     "seam": "红蓝分界没连成一条",
@@ -111,7 +126,7 @@ _BOX_STABLE_M = 0.03
 # 认完以后要转到的低头角，相对水平。固定俯仰停靠角保持原值；安装高度按配置读取。
 # 水平 20 到 80 厘米里，最远的白盒上沿大约 24 度，最近的地面大约 74 度，正中是 48.8 度。不按距离改。
 _SETTLED_LOOK_DOWN_DEG = 48.8
-_PARK_TOLERANCE_DEG = 2.0
+_PARK_TOLERANCE_DEG = 3.0
 
 
 def _side(value: float, positive: str, negative: str) -> str:
@@ -121,15 +136,16 @@ def _side(value: float, positive: str, negative: str) -> str:
     return f"{word} {abs(value):.2f} 米"
 
 
-def _spot(point, ground: Plane | None) -> str:
+def _spot(point, ground: Plane | None, cfg=None) -> str:
     if point is None:
-        return "这眼没看到"
-    xyz = np.asarray(point, dtype=float).reshape(3)
-    text = f"{_side(float(xyz[0]), '向右', '向左')}，{_side(float(xyz[1]), '向下', '向上')}，{_side(float(xyz[2]), '向前', '向后')}"
-    if ground is not None:
-        height = float(ground.signed_distance(xyz.reshape(1, 3))[0])
-        text += f"，离地大约 {height:.2f} 米"
-    return text
+        return '这眼没看到'
+    if ground is None:
+        return '缺少有效姿态，车身坐标待确认'
+    try:
+        world = body_point(point, ground.normal, cfg)
+    except ValueError:
+        return '姿态无效，车身坐标待确认'
+    return '相对小车右前 ' + _world_spot(world)
 
 
 def _world_spot(point) -> str:
@@ -143,8 +159,7 @@ def _world_spot(point) -> str:
 
 def _both_spots(world) -> str:
     """同一个点写两遍：小车右前角，以及彩色光心。轴都是向右、向前、向上。"""
-    optical = optical_from_car_world(world)
-    return f"相对小车右前 {_world_spot(world)}；相对光心 {_world_spot(optical)}"
+    return f"相对小车右前 {_world_spot(world)}"
 
 
 def _turn(yaw: float) -> str:
@@ -178,6 +193,9 @@ def pitch_need(search: StackSearch, pitch: float | None) -> str:
     if search.anchor is None:
         return "先低头，直到看见贴在地上的白盒"
     if not search.looked_up:
+        target = -search.vote_rise if search.vote_rise > .5 else 0.
+        if abs(pitch - target) <= 3.:
+            return '俯仰可以了，停止（±3°），保持检查塔顶'
         if search.nudges:
             return f"黄线顶到画面上沿，再抬头大约 {max(0.0, search.degrees):.0f} 度"
         if search.vote_rise > 0.5:
@@ -257,8 +275,9 @@ def describe(
     cap_color: str | None = None,
     cap_rgb: bool | str = False,
     cap_unmeasured: bool = False,
+    mount_cfg: dict | None = None,
 ) -> list[str]:
-    """这一帧要写在画面上的白话。白盒位置相对光心。塔顶同时写小车右前角和光心。
+    """这一帧要写在画面上的白话。白盒与塔顶位置均相对当前小车右前点，按车身轴向表达。
 
     层数、朝上颜色和俯仰变化留在最后，画的时候贴在窗口下沿。
     """
@@ -266,15 +285,22 @@ def describe(
     lines = [
         logic_line(search, info),
         pitch_now(pitch),
-        "下层白 " + _spot(info.get("lower_point"), ground),
+        "下层白 " + _spot(info.get("lower_point"), ground, mount_cfg),
     ]
+    if "cap_candidate_associated" in info:
+        state = ("顶块存在已确认，等待位姿和颜色完成" if info.get("cap_presence_confirmed")
+                 else "候选已关联当前塔，存在尚未确认" if info.get("cap_candidate_associated")
+                 else "未找到关联当前塔的有效顶块，背景候选不阻止白盒检查")
+        if info.get("cap_state") == "complete":
+            state = "顶块位姿和颜色识别完成"
+        lines.append("顶块状态：" + state)
     if info.get("cap_rgb_candidate"):
         visibility = "局部入画" if info.get("cap_partial") else "候选可见"
         lines.append(f"RGB 塔顶{visibility}，深度未确认，不计为塔顶")
     debug = info.get("rgb_debug")
     if debug:
         stage = {"color": "颜色点不足", "height/position": "高度或位置", "face": "面尺寸", "no_anchor_or_distance": "缺少位置参照", "accepted": "投影与面筛通过", "depth_unconfirmed": "深度未确认"}.get(debug.get("stage"), "深度候选已通过")
-        candidate = {"visible": "相邻红蓝可见", "no_anchor": "缺少塔位置参照", "no_adjacent_pair": "未找到相邻红蓝"}.get(debug.get("candidate"), "未检查")
+        candidate = {"visible": "相邻红蓝可见", "no_anchor": "缺少塔位置参照", "no_adjacent_pair": "未找到相邻红蓝", "size_mismatch": "红蓝尺寸不符", "depth_conflict": "实测深度与当前塔不符", "projection_insufficient": "投影证据不足"}.get(debug.get("candidate"), "未检查")
         lines.append(
             f"RGB诊断 红{debug.get('red', 0)} 蓝{debug.get('blue', 0)} "
             f"水平距离{debug.get('distance', 0):.2f}米 "
@@ -283,7 +309,7 @@ def describe(
             f"阶段：{stage} 候选：{candidate}"
         )
     if info.get("upper_white"):
-        lines.append("上层白 " + _spot(info.get("upper_point"), ground))
+        lines.append("上层白 " + _spot(info.get("upper_point"), ground, mount_cfg))
     elif search.looked_up and info.get("covers"):
         lines.append("上层白 高处没有成片的白")
     else:
@@ -297,7 +323,7 @@ def describe(
         lines.append(f"塔顶 {_both_spots(cap_world)}，{_turn(cap_yaw)}")
     elif cap_center is not None and cap_yaw is not None:
         lines.append(
-            f"塔顶 {_both_spots(camera_to_car_world(cap_center, up=None if ground is None else ground.normal))}，{_turn(cap_yaw)}"
+            f"塔顶 {_both_spots(body_point(cap_center, ground.normal, mount_cfg) if ground is not None else camera_to_car_world(cap_center))}，{_turn(cap_yaw)}"
         )
     elif cap_waiting:
         lines.append(f"塔顶还在对齐，已有 {cap_waiting} 帧")
@@ -375,7 +401,7 @@ def settled_look_down_line(pitch: float | None = None) -> str:
         return "俯仰读数无效，停止俯仰和旋转，等待姿态恢复"
     delta = _SETTLED_LOOK_DOWN_DEG - pitch
     if abs(delta) <= _PARK_TOLERANCE_DEG:
-        return "已到位，可以停止俯仰和旋转；保持当前俯仰，开启下一轮识别"
+        return "已到位，可以了，停止俯仰和旋转；保持当前俯仰，开启下一轮识别"
     direction = "低头" if delta > 0 else "抬头"
     return f"{direction} {abs(delta):.1f} 度，到低头 {_SETTLED_LOOK_DOWN_DEG:.1f} 度；旋转停止"
 
@@ -397,7 +423,7 @@ def competition_lines(search, pitch, cap_aim, finished, fallback, valid):
         return [current, "停止俯仰和旋转，等待姿态恢复", finished or "识别结果：待确认"]
     if fallback.active:
         action = fallback.instruction + "；旋转停止"
-        result = (f"识别完成 白盒层数 {fallback.layers}，没有顶块"
+        result = ("识别完成 " + fallback.result
                   if fallback.layers is not None else "识别结果：待确认")
     elif finished:
         action, result = settled_look_down_line(pitch), finished
@@ -440,18 +466,18 @@ def cap_aim_line(adjustment) -> str:
 
     def one(name: str, move) -> str:
         if move.direction == "none":
-            return f"{name}保持"
+            return f"{name}保持，可以了，停止"
         return f"{name} {words[move.direction]} {move.degrees:.1f} 度"
 
     if not adjustment.visible:
-        return "顶块这一眼看不出在不在画面里"
+        return "顶块这一眼看不出在不在画面里，停止俯仰和旋转，等待有效目标"
     return f"顶块入画 {one('俯仰', adjustment.pitch)}，{one('旋转', adjustment.yaw)}"
 
 
 def cap_aim_text(pixels, intr, gravity) -> str:
     """按看见的红蓝算还要不要转。没有红蓝，就说明这一眼看不出。"""
     if intr is None:
-        return "顶块这一眼看不出在不在画面里"
+        return "顶块这一眼看不出在不在画面里，停止俯仰和旋转，等待有效目标"
     return cap_aim_line(keep_in_frame(pixels, intr, gravity))
 
 
@@ -682,7 +708,7 @@ def measure_cap(color: np.ndarray, depth: np.ndarray, intr, ground: Plane, cfg: 
         zmin=float(cfg["depth_min"]), zmax=float(cfg["depth_max"])
     ):
         return None, "projection"
-    return pose, reason
+    return calibrate_cap(pose, ground.normal, cfg), reason
 
 
 def _blob(
@@ -772,6 +798,29 @@ def _write(image: np.ndarray, lines: list[str], bottom: list[str] | None = None)
     image[:] = cv2.cvtColor(np.asarray(panel), cv2.COLOR_RGB2BGR)
 
 
+
+def draw_motion_footer(image, current, action, bottom=None):
+    """在原有层数信息上方，用大字持续显示当前俯仰和动作。"""
+    panel = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(panel)
+    limit = max(image.shape[1] - 24, 40)
+    small = ImageFont.truetype(_FONT, _FONT_SIZE)
+    font_size = max(20, min(28, image.shape[1] // 40))
+    font = ImageFont.truetype(_FONT, font_size)
+    reserved = sum(len(_wrap(draw, text, small, max(image.shape[1] - 16, 40)))
+                   for text in (bottom or [])) * (_FONT_SIZE + 4)
+    rows = []
+    for text in (current, "动作提示：" + action):
+        rows.extend(_wrap(draw, text, font, limit))
+    step = font_size + 8
+    y = max(6, image.shape[0] - 16 - reserved - step * len(rows))
+    for row in rows:
+        draw.text((10, y), row, font=font, fill=(255, 255, 0),
+                  stroke_width=2, stroke_fill=(0, 0, 0))
+        y += step
+    image[:] = cv2.cvtColor(np.asarray(panel), cv2.COLOR_RGB2BGR)
+
+
 def paint(
     color: np.ndarray,
     bands: dict,
@@ -833,29 +882,36 @@ def main() -> None:
     parser.add_argument("--diagnostic-seconds", type=float, default=20.0,
                         help="诊断采集时长，默认 20 秒；结束后识别继续")
     args = parser.parse_args()
+    if not args.headless:
+        configure_qt_fonts()
     if not np.isfinite(args.diagnostic_seconds) or args.diagnostic_seconds <= 0:
         parser.error("--diagnostic-seconds 必须是大于 0 的有限数")
     cfg = load_config(args.config)
     names = light_names(cfg)
     lock = color_lock_from_config(cfg, starting_light(names, args.light))
-    intr = load_intrinsics("config/intrinsics.yaml")
     camera_height = selected_camera_height(args, cfg)
+    source = RealSenseSource(
+        int(cfg.get("color_width", 1280)),
+        int(cfg.get("color_height", 720)),
+        fps=int(cfg.get("fps", 30)),
+        color_lock=lock,
+        depth_width=int(cfg.get("depth_width", 848)),
+        depth_height=int(cfg.get("depth_height", 480)),
+    )
+    intr = source.intrinsics
     diagnostics = None
     if args.diagnostics is not None:
         from tower_diagnostics import DiagnosticRecorder
         directory = args.diagnostics
         if directory == "auto":
             directory = "/tmp/robocon-diagnostics-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        diagnostics = DiagnosticRecorder(directory, args.diagnostic_seconds, cfg, intr,
-                                         camera_height, Path(__file__).resolve().parent)
-    source = RealSenseSource(
-        intr.width,
-        intr.height,
-        fps=int(cfg.get("fps", 30)),
-        color_lock=lock,
-        depth_width=int(cfg.get("depth_width", 848)),
-        depth_height=int(cfg.get("depth_height", 480)),
-    )
+        try:
+            diagnostics = DiagnosticRecorder(directory, args.diagnostic_seconds, cfg, intr,
+                                             camera_height, Path(__file__).resolve().parent)
+        except Exception:
+            source.close()
+            raise
+        print(f"诊断保存目录：{diagnostics.path.resolve()}", flush=True)
     memory = GroundMemory()
     search = StackSearch()
     fallback = TopFallback(timeout=float(cfg.get("top_fallback_seconds", 15.0)))
@@ -872,11 +928,14 @@ def main() -> None:
     debug_window = DebugWindow()
     debug_window.visible = not args.competition and not args.headless
     last_terminal = -float("inf")
+    previous_result = None
     debug_frame = 0
     debug_start = time.monotonic()
     try:
         while True:
             if cycle.restart:
+                previous_result = (fallback.result
+                                   if fallback.layers is not None else watch.line)
                 search = StackSearch()
                 fallback = TopFallback(timeout=float(cfg.get("top_fallback_seconds", 15.0)))
                 caps = CapFusion(need=need, window=window)
@@ -960,7 +1019,7 @@ def main() -> None:
                 # 普通高度带只供定位和找塔顶，白盒层数留到返回低头后的顶面检查。
                 cap_search = dict(bands, upper_white=False, covers=False)
                 search.update([], cap_search, bands.get("distance"), float(cfg["cube_size"]), pitch, cleaned.gravity)
-            if not fallback.cap_confirmed and (bands.get("cap") or bands.get("cap_rgb_candidate")):
+            if not fallback.cap_confirmed and (bands.get("cap") or bands.get("cap_candidate_associated")):
                 search.kind = "two_cap"
             cap_draw = None
             cap_reason = None
@@ -973,10 +1032,17 @@ def main() -> None:
             fused = None
             cap_tint = None
             leans = plane is not None and box_leans(plane.normal, gravity)
-            if plane is not None and search.kind == "two_cap" and not leans:
+            if plane is not None and search.kind == "two_cap" and not leans and (bands.get("cap") or bands.get("cap_candidate_associated")):
                 measured, cap_reason = measure_cap(
                     cleaned.color, cleaned.depth, intr, plane, cfg, search.anchor
                 )
+                if measured is not None and search.anchor is not None:
+                    point = np.asarray(measured.center, dtype=float).reshape(1, 3)
+                    foot = plane.project(np.asarray(search.anchor).reshape(1, 3))[0]
+                    if (not np.isfinite(point).all() or
+                        not .60 <= float(plane.signed_distance(point)[0]) <= 1.04 or
+                        np.linalg.norm(plane.project(point)[0] - foot) > .45):
+                        measured, cap_reason = None, "association"
                 if measured is not None:
                     tint = cap_top_color(
                         cleaned.color,
@@ -1024,6 +1090,7 @@ def main() -> None:
                     float(cfg["depth_min"]),
                     float(cfg["depth_max"]),
                 )
+            outline = calibrate_cap(outline, None if plane is None else plane.normal, cfg)
             if outline is not None and not pose_matches_color(
                 outline, cleaned.color, intr, plane, _colored_mask(cleaned.color),
                 depth=cleaned.depth, zmin=float(cfg["depth_min"]), zmax=float(cfg["depth_max"])
@@ -1140,19 +1207,24 @@ def main() -> None:
                 fallback.update(now, search.anchor, final_world is not None, attitude_valid,
                                 camera_turning_fast(frame), pitch, cleaned.color, cleaned.depth,
                                 intr, plane, cfg,
-                                cap_visible=bool(bands.get("cap") or bands.get("cap_rgb_candidate")))
+                                cap_visible=bool(bands.get("cap_presence_confirmed", bands.get("cap", False)) or measured is not None))
             if fallback.active:
                 if not was_fallback:
                     watch.line = None
                 if fallback.layers is not None and fallback.layers != previous_layers:
-                    print(f"识别完成 白盒层数 {fallback.layers}，没有顶块", flush=True)
+                    print("识别完成 " + fallback.result, flush=True)
                 # 白盒数与塔顶独立；重新看到红蓝时恢复原有精测路径。
-                if fallback.layers == 2 and (bands.get("cap") or bands.get("cap_rgb_candidate")):
+                if fallback.layers == 2 and (bands.get("cap") or bands.get("cap_candidate_associated")):
                     search.kind = "two_cap"
             spoken = watch.offer(search, final_world, final_yaw, final_color) if attitude_valid and not candidate_unmeasured and not fallback.active and final_world is not None else None
             if spoken:
                 print(spoken, flush=True)
             cycle.update(watch.line, fallback.layers, pitch, attitude_valid, camera_turning_fast(frame))
+            bands["cap_presence_confirmed"] = bool(bands.get("cap_presence_confirmed", bands.get("cap", False)) or measured is not None)
+            bands["cap_state"] = ("complete" if final_world is not None else
+                                  "present" if bands["cap_presence_confirmed"] else
+                                  "associated" if bands.get("cap_candidate_associated") else
+                                  "candidate" if bands.get("cap_rgb_candidate") else "none")
             lines = describe(
                 search,
                 bands,
@@ -1168,9 +1240,12 @@ def main() -> None:
                 cap_color=final_color or cap_tint,
                 cap_rgb=cap_rgb,
                 cap_unmeasured=candidate_unmeasured,
+                mount_cfg=cfg,
             )
             lines = fallback.display(lines)
             lines = park_result(lines, watch.line if attitude_valid and not fallback.active else None, pitch)
+            if previous_result:
+                lines.insert(0, "上一轮结果：" + previous_result)
             if fix is None:
                 lines.insert(1, "还没看到地面")
             else:
@@ -1210,19 +1285,24 @@ def main() -> None:
                     lines[0:0] = diagnostics.lines(diagnostic_state)
                 elif diagnostics.finished or diagnostics.error:
                     lines.insert(0, f"诊断采集{'失败' if diagnostics.error else '结束'}，已保存 {diagnostics.index} 帧")
-            if args.headless:
-                # 必须在任何绘图、Qt窗口、waitKey调用之前分流；xcb错误会直接中止进程。
+            if args.headless or diagnostics is not None:
                 if now - last_terminal >= 1.0 or cycle.restart:
                     terminal_lines = competition_lines(search, pitch, cap_aim, watch.line, fallback, attitude_valid)
+                    if previous_result:
+                        terminal_lines.append("上一轮结果：" + previous_result)
                     print(" | ".join(terminal_lines), flush=True)
                     if cycle.restart:
                         print("本轮识别完成，保持低头位置，开始下一轮识别", flush=True)
                     last_terminal = now
+            if args.headless:
+                # 必须在任何绘图、Qt窗口、waitKey调用之前分流；xcb错误会直接中止进程。
                 fps = 1.0 / max(now - last, 1e-3)
                 last = now
                 continue
             if args.competition:
                 lines = competition_lines(search, pitch, cap_aim, watch.line, fallback, attitude_valid)
+                if previous_result:
+                    lines.append("上一轮结果：" + previous_result)
                 vis = frame.color.copy()
                 _write(vis, lines)
             else:
@@ -1238,6 +1318,15 @@ def main() -> None:
                 draw_source = "outline" if live is not None else (
                     "measured_latest" if measured is not None and cap_draw[0] is measured
                     else "historical_latest")
+            motion = competition_lines(search, pitch, cap_aim, watch.line, fallback, attitude_valid)
+            footer_bottom = [] if args.competition else split_status(lines)[1]
+            vis = vis.copy()
+            target_pitch = (fallback.target_pitch if fallback.active else
+                            _SETTLED_LOOK_DOWN_DEG if watch.line else
+                            -search.vote_rise if search.anchor is not None and not search.settled else None)
+            target_text = (f'；目标俯仰 {target_pitch:+.1f} 度' if target_pitch is not None
+                           else '；目标俯仰按动作提示调整')
+            draw_motion_footer(vis, motion[0] + target_text, motion[1], footer_bottom)
             debug_window.update(cleaned.color, cleaned.depth, intr,
                                 float(cfg["depth_min"]), float(cfg["depth_max"]),
                                 bands, vis, _write,
