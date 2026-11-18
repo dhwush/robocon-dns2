@@ -562,8 +562,9 @@ def test_window_text_is_plain_chinese():
     assert "每秒 10 帧" in text
     assert "室内" in text
     assert "向右 0.12 米" in text
-    assert "向下 0.08 米" in text
-    assert "向前 0.90 米" in text
+    assert "相对小车右前" in text
+    assert "向前 0.08 米" in text
+    assert "向上 0.90 米" in text
     assert "转角 正 11 度" in text
     assert "长边 0.35 米" in text
     assert "m" not in text

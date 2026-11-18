@@ -42,7 +42,7 @@ def test_candidate_only_has_no_outline_completion_or_historical_green_box(monkey
         return color
     monkeypatch.setattr(sys, 'argv', ['view_tower.py'])
     monkeypatch.setattr(view, 'RealSenseSource', Source)
-    monkeypatch.setattr(view, 'load_intrinsics', lambda *a: intr)
+    monkeypatch.setattr(Source, 'intrinsics', intr, raising=False)
     monkeypatch.setattr(view, 'StackSearch', lambda: StackSearch(kind='two_cap', settled=True))
     monkeypatch.setattr(StackSearch, 'update', lambda *a, **k: 'upstairs')
     monkeypatch.setattr(view, 'tower_ground', lambda *a: GroundFix(plane, 'imu', height=.68))

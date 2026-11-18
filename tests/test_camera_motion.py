@@ -167,6 +167,8 @@ def test_reopening_clears_old_pose_and_device_timestamps(monkeypatch):
     profile = SimpleNamespace(get_device=lambda: device)
     obj.pipeline = SimpleNamespace(start=lambda *args: profile)
     obj._config = object()
+    from sim.scene import intrinsics_for
+    monkeypatch.setattr("camera.source.device_color_intrinsics", lambda *args: intrinsics_for(160, 120))
     obj._rs.camera_info = SimpleNamespace(serial_number='serial')
     obj._accel_rotation = lambda: np.eye(3)
     obj._motion_rotation = lambda stream: np.eye(3)
@@ -222,11 +224,15 @@ def test_main_pauses_on_stale_pose_recovers_and_records_metadata(monkeypatch, tm
 
     monkeypatch.setattr(sys, 'argv', ['view_tower.py', '--diagnostics', str(tmp_path / 'capture')])
     monkeypatch.setattr(view, 'RealSenseSource', Source)
-    monkeypatch.setattr(view, 'load_intrinsics', lambda *a: intr)
+    monkeypatch.setattr(Source, 'intrinsics', intr, raising=False)
     monkeypatch.setattr(view, 'StackSearch', lambda: StackSearch(kind='two_cap', settled=True))
     monkeypatch.setattr(StackSearch, 'update', lambda *a, **k: 'upstairs')
     monkeypatch.setattr(view, 'tower_ground', ground)
     monkeypatch.setattr(view, 'measure_cap', measure)
+    # 姿态恢复测试需提供当前帧的有效顶块证据，旧search状态不再触发精测。
+    monkeypatch.setattr(view, 'coarse_bands', lambda *a, **k: dict(
+        cap=True, cap_presence_confirmed=True, lower=False, upper_white=False,
+        anchor=None, covers=False, cap_uv=np.empty((0,2),int)))
     monkeypatch.setattr(view, 'paint', paint)
     monkeypatch.setattr(view.cv2, 'imshow', lambda *a: None)
     monkeypatch.setattr(view.cv2, 'destroyAllWindows', lambda: None)

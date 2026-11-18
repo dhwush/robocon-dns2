@@ -16,11 +16,11 @@ from cube.detect import _color_layers
 from geom.transform import deproject_pixels
 
 
-_DEADBAND_RAD = np.deg2rad(0.6)
+_DEADBAND_RAD = np.deg2rad(3.0)
 # 顶块离开画面边不到这么多，才把它收回去。已经更靠里就保持，不转到画面中心。
 _FRAME_CLEARANCE_RAD = np.deg2rad(3.0)
-# 操作员不执行 5 度及以内。顶块贴边时，2 度以内保持，再大就写成 6 度。
-_CAP_IGNORE_RAD = np.deg2rad(2.0)
+# 顶块贴边时，3 度以内停止，再大就写成 6 度。
+_CAP_IGNORE_RAD = np.deg2rad(3.0)
 _CAP_COMMAND_RAD = np.deg2rad(6.0)
 # 顶面正方形对角线。补到这个跨度，被切掉的一截才算回来。
 _DIAGONAL = float(np.sqrt(2.0))
@@ -71,15 +71,15 @@ class ViewAdjustment:
 
 
 def _cap_command(signed: float) -> float:
-    """顶块贴边的输出。2 度以内保持，超过就写成 6 度，方向不变。"""
-    if abs(signed) <= _CAP_IGNORE_RAD:
+    """顶块贴边的输出。3 度以内停止，超过就写成 6 度，方向不变。"""
+    if abs(signed) <= _CAP_IGNORE_RAD + 1e-12:
         return 0.0
     return float(np.copysign(_CAP_COMMAND_RAD, signed))
 
 
 def _move(kind: str, signed: float) -> AxisMove:
-    # 小于大约 0.6° 就当成已经对准，避免在 0 附近来回给相反方向。
-    if abs(signed) < _DEADBAND_RAD:
+    # 不超过 3° 就当成已经对准，避免在 0 附近来回给相反方向。
+    if abs(signed) <= _DEADBAND_RAD + 1e-12:
         return _none_move()
     if kind == "pitch":
         direction = "down" if signed > 0.0 else "up"

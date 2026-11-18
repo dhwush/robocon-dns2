@@ -32,7 +32,7 @@ def test_cube_inside_the_frame_does_not_ask_to_turn():
     assert view.ready
     assert view.pitch.direction == "none"
     assert view.yaw.direction == "none"
-    assert aim_line(view) == "俯仰 保持  旋转 保持"
+    assert aim_line(view) == "俯仰 可以了，停止（±3°）  旋转 可以了，停止（±3°）"
 
 
 def test_cube_cut_by_the_right_edge_turns_right():
@@ -61,7 +61,7 @@ def test_close_cube_that_cannot_fit_holds_both_axes():
     assert view.ready
     assert view.pitch.direction == "none"
     assert view.yaw.direction == "none"
-    assert aim_line(view) == "俯仰 保持  旋转 保持"
+    assert aim_line(view) == "俯仰 可以了，停止（±3°）  旋转 可以了，停止（±3°）"
 
 
 def test_cube_cut_by_the_top_edge_looks_up():
@@ -104,7 +104,7 @@ def test_cap_touching_the_right_and_top_only_tucks_inside():
 
     intr = intrinsics_for(320, 240)
     level = np.array([0.0, 1.0, 0.0])
-    pixels = np.array([[300, 0], [319, 0], [319, 40], [300, 40]], dtype=float)
+    pixels = np.array([[300, -20], [340, -20], [340, 40], [300, 40]], dtype=float)
     view = keep_in_frame(pixels, intr, level)
     assert view.clipped["right"]
     assert view.clipped["top"]
@@ -172,7 +172,7 @@ def test_white_beyond_the_range_is_not_aimed_at():
         zmax=float(cfg["depth_max"]),
     )
     assert view.reason == "no_cube"
-    assert aim_line(view) == "俯仰 保持  旋转 保持"
+    assert aim_line(view) == "俯仰停止，旋转停止，等待有效目标"
 
 
 def test_frame_drops_depth_outside_the_working_range():

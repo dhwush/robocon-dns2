@@ -17,9 +17,10 @@ import numpy as np
 
 from camera.source import RealSenseSource, color_lock_from_config
 from cube.aim import plan_view
+from cube.body_frame import body_record
 from cube.outline import OutlineTrack
 from cube.stack_look import StackSearch, coarse_bands, pitch_down_degrees, record_distance
-from geom.transform import deproject_pixels, load_intrinsics, project_points
+from geom.transform import deproject_pixels, project_points
 from ground.plane import Plane
 from main import (
     GroundMemory,
@@ -251,7 +252,7 @@ def reject_text(reason: str | None) -> str:
 def _cube_lines(name: str, record: dict) -> list[str]:
     return [
         name,
-        f"{_place(record['x'], '向右', '向左')}，{_place(record['y'], '向下', '向上')}，{_place(record['z'], '向前', '向后')}",
+        f"相对小车右前 {_place(record['x'], '向右', '向左')}，{_place(record['y'], '向前', '向后')}，{_place(record['z'], '向上', '向下')}",
         _turn_words(record["yaw"]),
         f"长边 {record['long_side']:.2f} 米，短边 {record['short_side']:.2f} 米",
     ]
@@ -260,10 +261,12 @@ def _cube_lines(name: str, record: dict) -> list[str]:
 def aim_line(adjustment) -> str:
     # 这一帧还要转多少。保持表示这个轴不用动。
     words = {"down": "低头", "up": "抬头", "right": "右转", "left": "左转"}
+    if not adjustment.visible:
+        return "俯仰停止，旋转停止，等待有效目标"
 
     def one(name: str, move) -> str:
         if move.direction == "none":
-            return f"{name} 保持"
+            return f"{name} 可以了，停止（±3°）"
         return f"{name} {words[move.direction]} {move.degrees:.1f}°"
 
     return f"{one('俯仰', adjustment.pitch)}  {one('旋转', adjustment.yaw)}"
@@ -348,15 +351,15 @@ def main() -> None:
     args = parser.parse_args()
     cfg = load_config(args.config)
     lock = color_lock_from_config(cfg, args.light)
-    intr = load_intrinsics("config/intrinsics.yaml")
     source = RealSenseSource(
-        intr.width,
-        intr.height,
+        int(cfg.get("color_width", 1280)),
+        int(cfg.get("color_height", 720)),
         fps=int(cfg.get("fps", 30)),
         color_lock=lock,
         depth_width=int(cfg.get("depth_width", 848)),
         depth_height=int(cfg.get("depth_height", 480)),
     )
+    intr = source.intrinsics
     camera_height = selected_camera_height(args, cfg)
     memory = GroundMemory()
     search = StackSearch()
@@ -424,12 +427,19 @@ def main() -> None:
                 zmin=float(cfg["depth_min"]),
                 zmax=float(cfg["depth_max"]),
             )
+            body_records = []
+            if cleaned.gravity is not None:
+                for item in records:
+                    try:
+                        body_records.append(body_record(item, -np.asarray(cleaned.gravity), cfg))
+                    except ValueError:
+                        pass
             lines = _lines(
                 fps,
                 lock,
                 ground,
-                shown,
-                records,
+                body_records,
+                body_records,
                 reason,
                 watch,
                 pending=not search.settled,

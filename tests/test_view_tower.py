@@ -56,7 +56,7 @@ def test_low_look_says_to_rise_and_does_not_give_a_layer():
     assert lines[-2] == "层数还没定"
     assert lines[-1].startswith("还要抬头大约 35 度")
     assert "当前低头 35 度" in text
-    assert "下层白 向右 0.10 米" in text
+    assert "下层白 缺少有效姿态，车身坐标待确认" in text
     assert "上层白 这眼还没看到" in text
     assert "塔顶 这眼没有红蓝" in text
 
@@ -180,8 +180,9 @@ def test_cap_settles_two_layers_and_can_show_a_measured_center():
     lines = describe(search, high, 0.0, cap_center=center, cap_yaw=0.2)
     text = "\n".join(lines)
     assert "层数 2，有红蓝塔顶" in text
-    assert "上层白 向右 0.12 米" in text
-    assert "相对光心 向右 0.08 米" in text
+    assert "上层白 缺少有效姿态，车身坐标待确认" in text
+    assert "相对小车右前 向左 0.13 米" in text
+    assert "相对光心" not in text
     assert "转角正" in text
     missed = describe(search, high, 0.0, cap_reason="depth")
     assert "上面的深度太少" in "\n".join(missed)
@@ -193,8 +194,7 @@ def test_cap_settles_two_layers_and_can_show_a_measured_center():
         cap_yaw=0.0,
     )
     assert (
-        "塔顶 相对小车右前 向左 0.13 米，向前 0.70 米，向上 0.80 米；"
-        "相对光心 向右 0.08 米，向前 0.65 米，向上 0.13 米，转角基本摆正"
+        "塔顶 相对小车右前 向左 0.13 米，向前 0.70 米，向上 0.80 米，转角基本摆正"
     ) in "\n".join(world)
     waiting = describe(search, high, 0.0, cap_waiting=2)
     assert "塔顶还在对齐，已有 2 帧" in "\n".join(waiting)
@@ -208,8 +208,8 @@ def test_cap_inside_the_frame_holds_even_off_center():
     intr = intrinsics_for(320, 240)
     inside = np.array([[220, 70], [260, 70], [260, 110], [220, 110]], dtype=float)
     held = cap_aim_text(inside, intr, level)
-    assert held == "顶块入画 俯仰保持，旋转保持"
-    edge = np.array([[300, 0], [319, 0], [319, 40], [300, 40]], dtype=float)
+    assert held == "顶块入画 俯仰保持，可以了，停止，旋转保持，可以了，停止"
+    edge = np.array([[300, -20], [340, -20], [340, 40], [300, 40]], dtype=float)
     turned = cap_aim_text(edge, intr, level)
     assert "右转" in turned
     assert "抬头" in turned
@@ -227,7 +227,7 @@ def test_cap_inside_the_frame_holds_even_off_center():
     same = park_result(describe(search, high, 35.0, cap_aim="俯仰低头 6.0 度", cap_color="red"), "识别完成", 35.0)
     assert same[-1] == parked[-1]
     missing = cap_aim_text(None, intr, level)
-    assert missing == "顶块这一眼看不出在不在画面里"
+    assert missing == "顶块这一眼看不出在不在画面里，停止俯仰和旋转，等待有效目标"
     plain = "\n".join(describe(search, high, 0.0))
     assert "顶块入画" not in plain
     assert "顶块对准" not in text
@@ -267,8 +267,7 @@ def test_cap_announcement_waits_for_a_pose_and_a_color():
     line = watch.offer(search, np.array([0.12, 0.55, 0.80]), yaw, "red")
     assert line == (
         "识别完成 层数 2 顶块红色 "
-        "相对小车右前 向右 0.12 米，向前 0.55 米，向上 0.80 米；"
-        "相对光心 向右 0.33 米，向前 0.50 米，向上 0.13 米，转角正 15 度"
+        "相对小车右前 向右 0.12 米，向前 0.55 米，向上 0.80 米，转角正 15 度"
     )
     assert watch.offer(search, np.array([9.0, 9.0, 9.0]), yaw, "blue") is None
     assert watch.line == line
@@ -379,12 +378,12 @@ def test_looking_up_still_counts_as_waiting_for_the_top_color():
 
     intr = intrinsics_for(320, 240)
     level = np.array([0.0, 1.0, 0.0])
-    touching = keep_in_frame(np.array([[160, 0], [160, 40]], dtype=float), intr, level)
+    touching = keep_in_frame(np.array([[160, -20], [160, 40]], dtype=float), intr, level)
     assert touching.pitch.direction == "up"
     assert touching.yaw.direction == "none"
     assert color_view_held(touching)
 
-    turning = keep_in_frame(np.array([[319, 0], [300, 40]], dtype=float), intr, level)
+    turning = keep_in_frame(np.array([[340, -20], [300, 40]], dtype=float), intr, level)
     assert turning.yaw.direction == "right"
     assert not color_view_held(turning)
 

@@ -36,9 +36,9 @@ python3 measure_charuco.py --read-intrinsics --save-intrinsics config/device_int
 
 按用户要求忽略棋盘中心与A4纸中心的2mm偏移，board_center_to_a4_center为零；cube_mount_confirmed为true。这是基于确认的安装几何，仍需实机量测验证打印尺度和误差。
 
-2号车上板的纸下边朝摄像头（车前）。图1为俯视图，CAD的X向图下、Y向图右，车前向图左；程序车系固定为X向车右、Y向车前、Z向上，所以程序车系=(-CAD_X,-CAD_Y,CAD_Z)。图中从车右前角到纸中心的CAD位移(175,134.8,570)mm，转换到程序车系为(-175,-134.8,570)mm。
+2号车上板的纸上边朝摄像头（车前），已按确认的180°反向安装修正。图1为俯视图，CAD的X向图下、Y向图右，车前向图左；程序车系固定为X向车右、Y向车前、Z向上，所以程序车系=(-CAD_X,-CAD_Y,CAD_Z)。图中从车右前角到纸中心的CAD位移(175,134.8,570)mm，转换到程序车系为(-175,-134.8,570)mm。
 
-2号板X向车左、Y向车前、Z向车下，故R_car_board2=diag(-1,1,-1)。棋盘中心在板系(120,90,0)mm，棋盘左上角位置t_car_board2=纸中心-R_car_board2×棋盘中心=(-55,-224.8,570)mm。配置已启用此变换并设置board2_mount_confirmed=true。同帧识别两块板后优先用双板计算，不依赖相机安装位置或重力。
+2号板X向车右、Y向车后、Z向车下，故R_car_board2=diag(1,-1,-1)。棋盘中心在板系(120,90,0)mm，棋盘左上角位置t_car_board2=纸中心-R_car_board2×棋盘中心=(-295,-44.8,570)mm。配置已启用此变换并设置board2_mount_confirmed=true。同帧识别两块板后优先用双板计算，不依赖相机安装位置或重力。
 
 JSON的optical_axes为[right,down,forward]，car_axes为[right,forward,up]；坐标和距离单位均为米，窗口显示毫米。
 

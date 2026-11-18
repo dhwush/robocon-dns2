@@ -356,7 +356,7 @@ def test_outline_line_names_the_top_color_and_is_not_a_finished_result():
     )
     text = "\n".join(lines)
     assert "按黄线推算 相对小车右前" in text
-    assert "相对光心" in text
+    assert "相对光心" not in text
     assert "朝上是红色" in text
     assert "识别完成" not in text
     assert "绿框是这一眼按黄线推算" in text

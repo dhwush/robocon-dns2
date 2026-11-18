@@ -1,4 +1,4 @@
-"""地面白盒位姿。外参是单位阵，体心相对光心：向右 x、向下 y、向前 z。"""
+"""白盒输出相对当前小车右前点，X右/Y前/Z上，使用本帧姿态补偿相机俯仰。"""
 
 from __future__ import annotations
 
@@ -13,10 +13,11 @@ import yaml
 
 from camera.source import Frame, RealSenseSource, color_lock_from_config, filter_depth
 from cube.aim import plan_view
+from cube.body_frame import body_record
 from cube.detect import detect_white_layers, white_keepout
 from cube.stack_look import StackSearch, coarse_bands, pitch_down_degrees, record_distance, second_layer_cue
 from fuse.median import fuse_poses
-from geom.transform import fold_yaw_quarter, load_intrinsics
+from geom.transform import fold_yaw_quarter
 from ground.plane import (
     GroundFix,
     Plane,
@@ -381,16 +382,17 @@ def selected_camera_height(args, cfg: dict) -> float | None:
     return height
 
 
-def run_live(cfg: dict, intr, camera_height: float | None, color_lock: dict | None) -> None:
+def run_live(cfg: dict, camera_height: float | None, color_lock: dict | None) -> None:
     # 至少 5 帧、最多 15 帧取中值。地面原点跳过 30 mm 就清空。失败后 0.5 s 内沿用上一结果。
     source = RealSenseSource(
-        intr.width,
-        intr.height,
+        int(cfg.get("color_width", 1280)),
+        int(cfg.get("color_height", 720)),
         fps=int(cfg.get("fps", 30)),
         color_lock=color_lock,
         depth_width=int(cfg.get("depth_width", 848)),
         depth_height=int(cfg.get("depth_height", 480)),
     )
+    intr = source.intrinsics
     memory = GroundMemory()
     search = StackSearch()
     buckets: dict[int, list[dict]] = {}
@@ -460,6 +462,7 @@ def run_live(cfg: dict, intr, camera_height: float | None, color_lock: dict | No
             if search.settled_one:
                 buckets.pop(2, None)
                 seen.pop(2, None)
+            # 检测和搜索仍使用相机点；进入融合前统一到车身坐标。
             kept = []
             for sample in found:
                 level = int(sample["layer"])
@@ -467,7 +470,12 @@ def run_live(cfg: dict, intr, camera_height: float | None, color_lock: dict | No
                     continue
                 if level == 1 and search.stage in ("upstairs", "both"):
                     continue
-                kept.append(sample)
+                if cleaned.gravity is not None:
+                    try:
+                        sample = body_record(sample, -np.asarray(cleaned.gravity), cfg)
+                    except ValueError:
+                        continue
+                    kept.append(sample)
             present = {int(sample["layer"]) for sample in kept}
             for sample in kept:
                 level = int(sample["layer"])
@@ -509,18 +517,18 @@ def run_live(cfg: dict, intr, camera_height: float | None, color_lock: dict | No
             if not search.settled:
                 # 层数还没定，不把白盒体心当成结果。
                 public = {
-                    "frame": "camera",
+                    "frame": "car_front_right",
                     "looking": "up" if search.looked_up else ("down" if search.anchor is not None else "ground"),
                 }
             elif not cubes and search.kind == "one":
                 fail_since = None
-                public = {"frame": "camera", "layers": 1, "kind": "one", "cap": False}
+                public = {"frame": "car_front_right", "layers": 1, "kind": "one", "cap": False}
                 last_public = public
             elif not cubes:
                 if fail_since is None:
                     fail_since = now
                 public = last_public if last_public is not None and now - fail_since <= hold_s else {
-                    "frame": "camera",
+                    "frame": "car_front_right",
                     "layers": 1 if search.kind == "one" else 2,
                     "kind": search.kind,
                     "cap": search.kind == "two_cap",
@@ -529,7 +537,7 @@ def run_live(cfg: dict, intr, camera_height: float | None, color_lock: dict | No
                 fail_since = None
                 primary = next((cube for cube in cubes if cube["layer"] == 1), cubes[0])
                 public = {
-                    "frame": "camera",
+                    "frame": "car_front_right",
                     "layers": 1 if search.kind == "one" else 2,
                     "kind": search.kind,
                     "cap": search.kind == "two_cap",
@@ -556,8 +564,22 @@ def run_live(cfg: dict, intr, camera_height: float | None, color_lock: dict | No
             )
             if now >= next_out:
                 printed = dict(public)
+                attitude_ok = pitch_down_degrees(cleaned.gravity) is not None
+                printed['motion_arrived'] = bool(attitude_ok and adjustment.visible and adjustment.ready)
+                def status(name, move):
+                    if not attitude_ok or not adjustment.visible:
+                        return name + '停止，等待有效姿态和目标'
+                    if move.direction == 'none':
+                        return name + '可以了，停止（±3°）'
+                    words = {'down': '低头', 'up': '抬头', 'left': '左转', 'right': '右转'}
+                    return f'{name}{words[move.direction]} {move.degrees:.1f} 度'
+                printed['motion_status'] = status('俯仰', adjustment.pitch) + '；' + status('旋转', adjustment.yaw)
+                if not attitude_ok:
+                    for key in ('x', 'y', 'z', 'yaw', 'cubes'):
+                        printed.pop(key, None)
+                    printed['attitude_valid'] = False
                 printed["pitch"] = adjustment.pitch.as_dict()
-                printed["yaw"] = adjustment.yaw.as_dict()
+                printed["yaw_command"] = adjustment.yaw.as_dict()
                 print(json.dumps(printed, ensure_ascii=False), flush=True)
                 next_out = now + period
     finally:
@@ -572,8 +594,7 @@ def main() -> None:
     parser.add_argument("--on-platform", action="store_true")
     args = parser.parse_args()
     cfg = load_config(args.config)
-    intr = load_intrinsics("config/intrinsics.yaml")
-    run_live(cfg, intr, selected_camera_height(args, cfg), color_lock_from_config(cfg, args.light))
+    run_live(cfg, selected_camera_height(args, cfg), color_lock_from_config(cfg, args.light))
 
 
 if __name__ == "__main__":

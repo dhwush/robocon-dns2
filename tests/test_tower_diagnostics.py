@@ -68,6 +68,14 @@ def test_duration_stops_and_restores_profile(tmp_path):
 
 
 def test_existing_capture_not_overwritten(tmp_path):
-    import pytest
-    with pytest.raises(FileExistsError):
-        DiagnosticRecorder(tmp_path, 20, {}, intrinsics_for(16, 12), .7, tmp_path)
+    root = tmp_path / 'repo'
+    root.mkdir()
+    requested = tmp_path / 'capture'
+    requested.mkdir()
+    original = requested / 'manifest.json'
+    original.write_text('original capture')
+    (tmp_path / 'capture-1').mkdir()
+    recorder = DiagnosticRecorder(requested, 20, {}, intrinsics_for(16, 12), .7, root)
+    assert recorder.path == tmp_path / 'capture-2'
+    assert original.read_text() == 'original capture'
+    assert (recorder.path / 'manifest.json').is_file()

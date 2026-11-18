@@ -62,7 +62,7 @@ def test_close_depthless_rgb_is_visible_after_pitch_change():
     intr, plane, foot, color, depth = scene(-9)
     cfg = load_config('config/default.yaml')
     bands = coarse_bands(color, depth, plane, intr, cfg['colors'], .05, 1.2, foot, pitch=-9)
-    assert bands['cap']
+    assert not bands['cap'] and bands['cap_rgb_candidate']
     assert bands['rgb_debug']['candidate'] == 'visible'
 
 
@@ -94,10 +94,11 @@ def test_upward_view_does_not_use_near_zero_ground_anchor_z_as_distance():
     assert foot[2] < 0.15
     cfg = load_config('config/default.yaml')
     bands = coarse_bands(color, depth, plane, intr, cfg['colors'], .05, 1.2, foot, pitch=-15)
-    assert bands['cap']
-    assert bands['cap_point'] is not None
-    assert bands['rgb_debug']['stage'] == 'accepted'
-    assert abs(bands['rgb_debug']['distance'] - 0.22) < 1e-8
+    assert not bands['cap'] and bands['cap_rgb_candidate']
+    assert bands['cap_point'] is None
+    assert bands['cap_candidate_associated']
+    assert not bands['cap_presence_confirmed']
+    assert bands['rgb_debug']['stage'] == 'depth_unconfirmed'
 
 
 def test_visible_candidate_survives_full_face_rejection_without_becoming_a_pose():
@@ -110,8 +111,7 @@ def test_visible_candidate_survives_full_face_rejection_without_becoming_a_pose(
     color[np.abs(height - .8) < .008] = 40
     bands = coarse_bands(color, depth, plane, intr, load_config('config/default.yaml')['colors'],
                          .05, 1.2, foot, pitch=-15)
-    assert bands['rgb_debug']['face'] == 0
-    assert bands['cap'] and bands['cap_rgb_candidate']
+    assert not bands['cap'] and bands['cap_rgb_candidate']
     assert bands['cap_point'] is None
     # The visibility-only relaxation does not relax the precise seam extractor.
     assert len(color_seam_pixels(color)) == 0

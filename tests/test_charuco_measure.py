@@ -112,8 +112,8 @@ def test_confirmed_mount_maps_paper_center_and_board_axes():
     R, t = np.array(cfg['R_car_board2']), np.array(cfg['t_car_board2'])
     # CAD图中的纸中心在右前角原点的后方、左侧、上方。
     np.testing.assert_allclose(R @ [.120, .090, 0.] + t, [-.175, -.1348, .570])
-    np.testing.assert_allclose(R @ [0., 1., 0.], [0., 1., 0.])  # 纸下边朝车前
-    np.testing.assert_allclose(R @ [1., 0., 0.], [-1., 0., 0.])
+    np.testing.assert_allclose(R @ [0., 1., 0.], [0., -1., 0.])  # 纸下边朝车后，纸上边朝车前
+    np.testing.assert_allclose(R @ [1., 0., 0.], [1., 0., 0.])
     np.testing.assert_allclose(R @ [0., 0., 1.], [0., 0., -1.])
     assert np.isclose(np.linalg.det(R), 1.)
     # 200mm顶块；最近顶角在左上，顶面在印刷面背后3mm。
@@ -185,7 +185,7 @@ def test_yaw_is_board_heading_in_car_frame_with_positive_right_turn():
     R2 = np.asarray(cfg['R_car_board2'])
     for expected in (0., 30., -45., 90.):
         # 右转为正，与常规绕Z逆时针的旋转符号相反。
-        R1 = cv2.Rodrigues(np.array([0., 0., -np.radians(expected)]))[0] @ R2
+        R1 = cv2.Rodrigues(np.array([0., 0., -np.radians(expected)]))[0] @ np.diag([-1., 1., -1.])
         # 上述R1是车系方向，转换为2号板系以构造相机看到的方向。
         camera_R1 = R2.T @ R1
         result = measure((camera_R1, np.array([0., 0., 1.]), .1, 20),
@@ -207,3 +207,13 @@ def test_chinese_output_and_degenerate_yaw():
     assert any('相对小车右前角：暂无有效结果' in line for line in lines)
     shown = draw_chinese(np.zeros((720, 1280, 3), np.uint8), lines)
     assert shown.shape == (720, 1280, 3) and shown.any()
+
+
+def test_corrected_board2_mount_places_recorded_target_in_front():
+    cfg = config()
+    # 从旧截图(-81.8,-728.1,726.9)mm及旧外参还原的2号板局部坐标。
+    target_in_board2 = np.array([.0268, -.5033, -.1569])
+    R, t = np.array(cfg['R_car_board2']), np.array(cfg['t_car_board2'])
+    target = R @ target_in_board2 + t
+    np.testing.assert_allclose(target, [-.2682, .4585, .7269], atol=1e-8)
+    assert target[1] > 0

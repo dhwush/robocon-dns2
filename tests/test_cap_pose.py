@@ -170,10 +170,10 @@ def test_two_faces_meet_at_the_vertical_edge():
     assert abs(float(pose.center[2]) - 0.65) < 0.03
 
 
-def test_world_shift_adds_the_car_motion_from_radar():
+def test_car_motion_is_not_added_to_current_body_coordinates():
     moved = camera_to_car_world(np.array([0.0, -0.10, 0.65]), np.array([1.0, 2.0, 0.0]))
-    assert abs(float(moved[0]) - 0.789) < 1e-6
-    assert abs(float(moved[1]) - 2.70) < 1e-6
+    assert abs(float(moved[0]) - (-0.211)) < 1e-6
+    assert abs(float(moved[1]) - .70) < 1e-6
     assert abs(float(moved[2]) - 0.769) < 1e-6
 
 

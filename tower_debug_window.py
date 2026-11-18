@@ -2,6 +2,7 @@
 from datetime import datetime
 from pathlib import Path
 import json
+import time
 import cv2
 import numpy as np
 from cube.cap_pose import _color_masks
@@ -59,8 +60,10 @@ def build_panel(color, depth, intr, zmin, zmax, bands, result_image, write, meta
 
 
 class DebugWindow:
-    def __init__(self):
-        self.visible = True
+    def __init__(self, refresh_interval=1.0):
+        self.visible = False
+        self.refresh_interval = float(refresh_interval)
+        self.last_refresh = None
         self.frozen = False
         self.image = None
         self.metadata = None
@@ -69,8 +72,13 @@ class DebugWindow:
     def update(self, *args):
         if not self.visible:
             return
+        now = time.monotonic()
         if not self.frozen or self.image is None:
+            if (self.image is not None and self.last_refresh is not None
+                    and now - self.last_refresh < self.refresh_interval):
+                return
             self.image, self.metadata = build_panel(*args)
+            self.last_refresh = time.monotonic()
         if not self.opened:
             cv2.namedWindow(TITLE, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(TITLE, 1152, 837)
@@ -83,11 +91,13 @@ class DebugWindow:
     def key(self, key):
         if key in (ord('d'), ord('D')):
             self.visible = not self.visible
+            self.last_refresh = None
             if self.opened:
                 cv2.destroyWindow(TITLE)
                 self.opened = False
         elif key in (ord('f'), ord('F')):
             self.frozen = not self.frozen
+            self.last_refresh = None
         elif key in (ord('s'), ord('S')) and self.image is not None:
             folder = Path('/tmp') / ('tower-debug-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
             folder.mkdir()

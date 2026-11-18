@@ -1,4 +1,4 @@
-# 单台文件，序列号 244622071936。实机按接上的号码从 config/cameras.yaml 取，不读这一份。
+# 历史内参快照，序列号 244622071936。任务2实时识别入口直接读取设备彩色内参，不使用此文件。
 # D435i serial 244622071936, color factory intrinsics at 1280x720.
 # From 20261005_144558/pose_log.txt (Camera 2, Task 1). Depth on the same unit
 # was checked separately. Aligned frames deproject with this color K.

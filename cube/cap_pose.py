@@ -131,26 +131,17 @@ def camera_to_car_world(
     up: np.ndarray | None = None,
     camera_height: float | None = None,
 ) -> np.ndarray:
-    """相机系向右、向下、向前，换成世界系向右、向前、向上。
-
-    抬头或低头时，先用朝上方向把点放平，不再把光轴距离当成水平距离。
-    光心在车右前角的右侧 0.211 米、前方 0.05 米、上方 0.669 米；明确给出 camera_height 时使用该高度。
-    car_shift 是雷达给出的小车平移，加在世界系上。没有雷达时是 0。
-    """
-    origin = _OPTICAL_WORLD.copy()
-    if camera_height is not None:
-        origin[2] = float(camera_height)
-    world = _level_from_camera(point, up) + origin
-    if car_shift is not None:
-        world = world + np.asarray(car_shift, dtype=float).reshape(3)
-    return world
+    """换算到当前车身右前点；旧 car_shift 参数保留但不再累计车辆平移。"""
+    from cube.body_frame import body_point
+    cfg = {} if camera_height is None else {'camera_optical_center_m': [-.211, .05, float(camera_height)]}
+    return body_point(point, np.array([0., -1., 0.]) if up is None else up, cfg)
 
 
-def optical_from_car_world(world: np.ndarray, car_shift: np.ndarray | None = None) -> np.ndarray:
-    """相对小车右前角的点，改成相对彩色光心。轴仍是向右、向前、向上。"""
-    origin = np.array(_OPTICAL_WORLD, dtype=float)
-    if car_shift is not None:
-        origin = origin + np.asarray(car_shift, dtype=float).reshape(3)
+def optical_from_car_world(world: np.ndarray, car_shift: np.ndarray | None = None,
+                           up=None, cfg=None) -> np.ndarray:
+    """车身坐标减去本帧光心安装位置，仍按车身轴向表达。"""
+    from cube.body_frame import body_mount
+    _, origin = body_mount(np.array([0., -1., 0.]) if up is None else up, cfg)
     return np.asarray(world, dtype=float).reshape(3) - origin
 
 

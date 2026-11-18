@@ -415,30 +415,68 @@ def park_result(lines: list[str], finished: str | None, pitch: float | None = No
     return body + kept + [settled_look_down_line(pitch)]
 
 
-def competition_lines(search, pitch, cap_aim, finished, fallback, valid):
-    """比赛只展示当前角度、动作要求和可确认的结果。"""
+def motion_guidance(search, pitch, finished, fallback, valid, moving=False, cap_aim=None):
+    """窗口、终端和目标角度共用同一份动作判断。"""
+    target = (fallback.target_pitch if fallback.active else
+              _SETTLED_LOOK_DOWN_DEG if finished else
+              fallback.top_target_pitch if search.anchor is not None else None)
+    if not valid or pitch is None or not np.isfinite(pitch):
+        return target, '停止俯仰和旋转，等待姿态恢复'
+    if moving:
+        return target, '停止俯仰和旋转，等待稳定'
+    if fallback.layers is not None:
+        return target, '角度已到达，停止俯仰和旋转；保持当前俯仰'
+    if finished and not fallback.active:
+        return target, settled_look_down_line(pitch)
+    if cap_aim and not fallback.active:
+        return target, cap_aim
+    if target is None:
+        return target, '先低头寻找下层白盒；旋转停止'
+    tolerance = _PARK_TOLERANCE_DEG if finished and not fallback.active else 3.
+    reached = fallback.at_target(pitch) if fallback.active else abs(target - pitch) <= tolerance
+    if reached:
+        action = '角度已到达，停止俯仰和旋转'
+        if fallback.active and fallback.upper_count:
+            action += f'；两层确认 {fallback.upper_count}/5 帧'
+        elif fallback.active and fallback.upper_hold_used:
+            action += '；保持当前俯仰，检查上层'
+        return target, action
+    delta = target - pitch
+    hint = ('；调整到上下层同时入画' if fallback.active and fallback.reliable_lower() is None else '')
+    return target, f'{"低头" if delta > 0 else "抬头"} {abs(delta):.1f}°；旋转停止{hint}'
+
+
+def competition_lines(search, pitch, cap_aim, finished, fallback, valid, moving=False):
+    """比赛与普通窗口使用相同的动作指令，结果独立于动作展示。"""
     current = (f"当前俯仰：低头为正 {pitch:+.1f} 度"
                if valid and pitch is not None and np.isfinite(pitch) else "当前俯仰：无有效读数")
+    _, action = motion_guidance(search, pitch, finished, fallback, valid, moving, cap_aim)
     if not valid:
-        return [current, "停止俯仰和旋转，等待姿态恢复", finished or "识别结果：待确认"]
-    if fallback.active:
-        action = fallback.instruction + "；旋转停止"
+        result = finished or "识别结果：待确认"
+    elif fallback.active:
         result = ("识别完成 " + fallback.result
                   if fallback.layers is not None else "识别结果：待确认")
-    elif finished:
-        action, result = settled_look_down_line(pitch), finished
     else:
-        guidance = (fallback.instruction if search.anchor is not None and fallback.instruction
-                    else pitch_need(search, pitch))
-        action = cap_aim or (guidance + "；旋转停止")
-        result = "识别结果：待确认"
+        result = finished or "识别结果：待确认"
     return [current, action, result]
+
+
+def terminal_status(search, pitch, finished, fallback, valid, previous_result=None, moving=False, cap_aim=None, result_number=None):
+    """Compact SSH status: angle, target, movement and latest confirmed result."""
+    result = (fallback.result if fallback.layers is not None else finished or previous_result)
+    result = result or '待确认'
+    result_label = f'第{result_number}次识别结果' if result_number is not None else '结果'
+    current = f'{pitch:+.1f}°' if valid and pitch is not None and np.isfinite(pitch) else '无效'
+    target, action = motion_guidance(search, pitch, finished, fallback, valid, moving, cap_aim)
+    expected = f'{target:+.1f}°' if target is not None and np.isfinite(target) else '待确定'
+    return f'当前俯仰：{current} | 预期俯仰：{expected} | 动作：{action} | {result_label}：{result}'
 
 
 class RecognitionCycle:
     """本轮完成后返回低头；无顶块则在顶面层数确认后直接换轮。"""
 
     def __init__(self):
+        self.result_number = None
         self.cap_reported = False
         self.restart = False
 
@@ -649,6 +687,90 @@ class BoxColorHold:
         self.color = color
         self.world = np.asarray(world, dtype=float).reshape(3).copy()
         self.yaw = float(yaw)
+
+
+
+class TowerFlow:
+    """集中管理一轮识别的生命周期，沿用原有判断顺序和切换条件。
+
+    检测、角度补偿和顶面扫描仍由原模块执行；这里统一安排调用与重置。
+    三种重置有意保留不同范围：失效保留下层，换塔保留地面，换轮全部更新。
+    """
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.need = int(cfg.get("min_samples", 5))
+        self.window = int(cfg.get("frames_to_fuse", 15))
+        self.outlines = OutlineLive()
+        self.watch = TowerWatch(hold_s=float(cfg.get("hold_s", 0.5)))
+        self.color_hold = BoxColorHold()
+        self.memory = GroundMemory()
+        self.search = StackSearch()
+        self._reset_measurement()
+
+    def _reset_measurement(self):
+        self.fallback = TopFallback(timeout=float(self.cfg.get("top_fallback_seconds", 15.0)))
+        self.caps = CapFusion(need=self.need, window=self.window)
+        self.outlines.reset()
+        self.color_hold.reset()
+        self.cycle = RecognitionCycle()
+
+    def reset(self, reason):
+        if reason not in ("next_cycle", "attitude_invalid", "target_changed"):
+            raise ValueError(f"Unknown tower reset: {reason}")
+        status = self.watch.status
+        self._reset_measurement()
+        if reason != "target_changed":
+            self.memory = GroundMemory()
+        if reason != "attitude_invalid":
+            self.search = StackSearch()
+            self.watch.reset()
+        if reason == "target_changed":
+            self.watch.status = status
+
+    def resources(self):
+        """供本帧的测量和绘图使用；重置后重新取得引用。"""
+        return (self.search, self.fallback, self.caps, self.outlines,
+                self.watch, self.color_hold, self.memory, self.cycle)
+
+    def target_departed(self, now, bands, valid, moving):
+        return (valid and not self.cycle.cap_reported and not self.fallback.active
+                and self.watch.depart(now, self.search, bands, moving=moving,
+                                      tracking=self.fallback.active))
+
+    def update_search(self, bands, pitch, gravity, valid):
+        if valid:
+            # 普通高度带只供定位和找塔顶；层数仍由返回后的顶面检查确认。
+            cap_search = dict(bands, upper_white=False, covers=False)
+            self.search.update([], cap_search, bands.get("distance"),
+                               float(self.cfg["cube_size"]), pitch, gravity)
+        if not self.fallback.cap_confirmed and (bands.get("cap") or bands.get("cap_candidate_associated")):
+            self.search.kind = "two_cap"
+
+    def update_result(self, now, valid, moving, pitch, color, depth, intr, plane,
+                      bands, measured, world, yaw, tint, candidate_unmeasured):
+        search, fallback, watch = self.search, self.fallback, self.watch
+        was_fallback = fallback.active
+        if not watch.line:
+            fallback.update(now, search.anchor, world is not None, valid, moving,
+                            pitch, color, depth, intr, plane, self.cfg, bands=bands,
+                            cap_visible=bool(bands.get("cap_presence_confirmed", bands.get("cap", False))
+                                             or measured is not None))
+        if fallback.active:
+            if not was_fallback:
+                watch.line = None
+            if fallback.layers == 2 and (bands.get("cap") or bands.get("cap_candidate_associated")):
+                search.kind = "two_cap"
+        return (watch.offer(search, world, yaw, tint)
+                if valid and not candidate_unmeasured and not fallback.active and world is not None
+                else None)
+
+    def complete_frame(self, result_count, pitch, valid, moving):
+        if (self.watch.line or self.fallback.layers is not None) and self.cycle.result_number is None:
+            result_count += 1
+            self.cycle.result_number = result_count
+        self.cycle.update(self.watch.line, self.fallback.layers, pitch, valid, moving)
+        return result_count
 
 
 def box_leans(normal, gravity, limit_deg: float = _BOX_LEAN_DEG) -> bool:
@@ -876,6 +998,7 @@ def main() -> None:
     parser.add_argument("--light", default=None)
     parser.add_argument("--camera-height", type=float, default=None)
     parser.add_argument("--headless", action="store_true", help="SSH无窗口模式：终端输出俯仰、动作要求和识别结果，Ctrl+C退出")
+    parser.add_argument("--debug-window", action="store_true", help="打开分步诊断窗口（也可按 D 打开；每秒最多刷新一次）")
     parser.add_argument("--competition", action="store_true", help="比赛简洁窗口：只显示俯仰、动作要求和识别结果")
     parser.add_argument("--diagnostics", nargs="?", const="auto", default=None,
                         metavar="DIR", help="保存原始帧和诊断信息；省略 DIR 时保存到 /tmp")
@@ -912,23 +1035,16 @@ def main() -> None:
             source.close()
             raise
         print(f"诊断保存目录：{diagnostics.path.resolve()}", flush=True)
-    memory = GroundMemory()
-    search = StackSearch()
-    fallback = TopFallback(timeout=float(cfg.get("top_fallback_seconds", 15.0)))
-    need = int(cfg.get("min_samples", 5))
-    window = int(cfg.get("frames_to_fuse", 15))
-    caps = CapFusion(need=need, window=window)
-    outlines = OutlineLive()
-    watch = TowerWatch(hold_s=float(cfg.get("hold_s", 0.5)))
-    color_hold = BoxColorHold()
+    flow = TowerFlow(cfg)
+    search, fallback, caps, outlines, watch, color_hold, memory, cycle = flow.resources()
     last = time.monotonic()
     fps = 0.0
     attitude_was_valid = False
-    cycle = RecognitionCycle()
     debug_window = DebugWindow()
-    debug_window.visible = not args.competition and not args.headless
+    debug_window.visible = args.debug_window and not args.competition and not args.headless
     last_terminal = -float("inf")
     previous_result = None
+    result_count = 0
     debug_frame = 0
     debug_start = time.monotonic()
     try:
@@ -936,14 +1052,8 @@ def main() -> None:
             if cycle.restart:
                 previous_result = (fallback.result
                                    if fallback.layers is not None else watch.line)
-                search = StackSearch()
-                fallback = TopFallback(timeout=float(cfg.get("top_fallback_seconds", 15.0)))
-                caps = CapFusion(need=need, window=window)
-                outlines.reset()
-                watch.reset()
-                color_hold.reset()
-                memory = GroundMemory()
-                cycle = RecognitionCycle()
+                flow.reset("next_cycle")
+                search, fallback, caps, outlines, watch, color_hold, memory, cycle = flow.resources()
             frame = source.read()
             receive_time = time.monotonic()
             capturing = diagnostics is not None and diagnostics.begin()
@@ -953,12 +1063,8 @@ def main() -> None:
             reset_reason = None
             attitude_valid = frame_attitude_valid(frame)
             if not attitude_valid and attitude_was_valid:
-                caps = CapFusion(need=need, window=window)
-                outlines.reset()
-                color_hold.reset()
-                memory = GroundMemory()
-                fallback = TopFallback(timeout=float(cfg.get("top_fallback_seconds", 15.0)))
-                cycle = RecognitionCycle()
+                flow.reset("attitude_invalid")
+                search, fallback, caps, outlines, watch, color_hold, memory, cycle = flow.resources()
                 reset_reason = "attitude_invalid"
             attitude_was_valid = attitude_valid
             cleaned = clean_frame(frame.color, frame.depth, frame.gravity if attitude_valid else None, cfg)
@@ -976,6 +1082,7 @@ def main() -> None:
             plane = None if fix is None else fix.plane
             pitch = pitch_down_degrees(cleaned.gravity)
             rotation = search.reorient(cleaned.gravity)
+            fallback.reorient(rotation)
             if watch.anchor is not None:
                 watch.anchor = rotation @ watch.anchor
             if watch.pending_anchor is not None:
@@ -994,17 +1101,10 @@ def main() -> None:
                 pitch=pitch,
             )
             now = time.monotonic()
-            if attitude_valid and not cycle.cap_reported and not fallback.active and watch.depart(now, search, bands, moving=camera_turning_fast(frame), tracking=fallback.active):
-                cycle = RecognitionCycle()
+            if flow.target_departed(now, bands, attitude_valid, camera_turning_fast(frame)):
                 reset_reason = "lower_anchor_moved" if bands.get("lower") and bands.get("anchor") is not None else "target_missing_timeout"
-                confirmed_status = watch.status
-                search = StackSearch()
-                fallback = TopFallback(timeout=float(cfg.get("top_fallback_seconds", 15.0)))
-                caps = CapFusion(need=need, window=window)
-                outlines.reset()
-                watch.reset()
-                watch.status = confirmed_status
-                color_hold.reset()
+                flow.reset("target_changed")
+                search, fallback, caps, outlines, watch, color_hold, memory, cycle = flow.resources()
                 bands = coarse_bands(
                     cleaned.color,
                     cleaned.depth,
@@ -1015,12 +1115,7 @@ def main() -> None:
                     float(cfg["depth_max"]),
                     None,
                 )
-            if attitude_valid:
-                # 普通高度带只供定位和找塔顶，白盒层数留到返回低头后的顶面检查。
-                cap_search = dict(bands, upper_white=False, covers=False)
-                search.update([], cap_search, bands.get("distance"), float(cfg["cube_size"]), pitch, cleaned.gravity)
-            if not fallback.cap_confirmed and (bands.get("cap") or bands.get("cap_candidate_associated")):
-                search.kind = "two_cap"
+            flow.update_search(bands, pitch, cleaned.gravity, attitude_valid)
             cap_draw = None
             cap_reason = None
             cap_yaw = None
@@ -1201,25 +1296,18 @@ def main() -> None:
                     cap_reason = None
                     cap_world = final_world
                     cap_yaw = final_yaw
-            was_fallback = fallback.active
             previous_layers = fallback.layers
-            if not watch.line:
-                fallback.update(now, search.anchor, final_world is not None, attitude_valid,
-                                camera_turning_fast(frame), pitch, cleaned.color, cleaned.depth,
-                                intr, plane, cfg,
-                                cap_visible=bool(bands.get("cap_presence_confirmed", bands.get("cap", False)) or measured is not None))
+            spoken = flow.update_result(
+                now, attitude_valid, camera_turning_fast(frame), pitch,
+                cleaned.color, cleaned.depth, intr, plane, bands, measured,
+                final_world, final_yaw, final_color, candidate_unmeasured,
+            )
             if fallback.active:
-                if not was_fallback:
-                    watch.line = None
-                if fallback.layers is not None and fallback.layers != previous_layers:
+                if not args.headless and fallback.layers is not None and fallback.layers != previous_layers:
                     print("识别完成 " + fallback.result, flush=True)
-                # 白盒数与塔顶独立；重新看到红蓝时恢复原有精测路径。
-                if fallback.layers == 2 and (bands.get("cap") or bands.get("cap_candidate_associated")):
-                    search.kind = "two_cap"
-            spoken = watch.offer(search, final_world, final_yaw, final_color) if attitude_valid and not candidate_unmeasured and not fallback.active and final_world is not None else None
-            if spoken:
+            if spoken and not args.headless:
                 print(spoken, flush=True)
-            cycle.update(watch.line, fallback.layers, pitch, attitude_valid, camera_turning_fast(frame))
+            result_count = flow.complete_frame(result_count, pitch, attitude_valid, camera_turning_fast(frame))
             bands["cap_presence_confirmed"] = bool(bands.get("cap_presence_confirmed", bands.get("cap", False)) or measured is not None)
             bands["cap_state"] = ("complete" if final_world is not None else
                                   "present" if bands["cap_presence_confirmed"] else
@@ -1244,6 +1332,10 @@ def main() -> None:
             )
             lines = fallback.display(lines)
             lines = park_result(lines, watch.line if attitude_valid and not fallback.active else None, pitch)
+            target_pitch, action = motion_guidance(
+                search, pitch, watch.line, fallback, attitude_valid, camera_turning_fast(frame), cap_aim)
+            if _status_start(lines) is not None:
+                lines[-1] = action
             if previous_result:
                 lines.insert(0, "上一轮结果：" + previous_result)
             if fix is None:
@@ -1266,7 +1358,10 @@ def main() -> None:
                     diagnostic_state = {
                         "top_fallback": {"active": fallback.active, "layers": fallback.layers,
                                          "target_pitch": fallback.target_pitch, "evidence": fallback.evidence,
-                                         "instruction": fallback.instruction},
+                                         "instruction": fallback.instruction,
+                                         "lower_reference": fallback.lower_reference,
+                                         "lower_reference_count": fallback.lower_reference_count,
+                                         "upper_count": fallback.upper_count},
                         "search_before": search_before, "search_after": search,
                         "bands": bands, "ground": plane, "pitch": pitch,
                         "reset_reason": reset_reason, "anchor_status": watch.status,
@@ -1287,12 +1382,9 @@ def main() -> None:
                     lines.insert(0, f"诊断采集{'失败' if diagnostics.error else '结束'}，已保存 {diagnostics.index} 帧")
             if args.headless or diagnostics is not None:
                 if now - last_terminal >= 1.0 or cycle.restart:
-                    terminal_lines = competition_lines(search, pitch, cap_aim, watch.line, fallback, attitude_valid)
-                    if previous_result:
-                        terminal_lines.append("上一轮结果：" + previous_result)
-                    print(" | ".join(terminal_lines), flush=True)
-                    if cycle.restart:
-                        print("本轮识别完成，保持低头位置，开始下一轮识别", flush=True)
+                    print(terminal_status(search, pitch, watch.line, fallback, attitude_valid,
+                                          previous_result, camera_turning_fast(frame), cap_aim,
+                                          result_count or None), flush=True)
                     last_terminal = now
             if args.headless:
                 # 必须在任何绘图、Qt窗口、waitKey调用之前分流；xcb错误会直接中止进程。
@@ -1300,7 +1392,7 @@ def main() -> None:
                 last = now
                 continue
             if args.competition:
-                lines = competition_lines(search, pitch, cap_aim, watch.line, fallback, attitude_valid)
+                lines = competition_lines(search, pitch, cap_aim, watch.line, fallback, attitude_valid, camera_turning_fast(frame))
                 if previous_result:
                     lines.append("上一轮结果：" + previous_result)
                 vis = frame.color.copy()
@@ -1318,12 +1410,9 @@ def main() -> None:
                 draw_source = "outline" if live is not None else (
                     "measured_latest" if measured is not None and cap_draw[0] is measured
                     else "historical_latest")
-            motion = competition_lines(search, pitch, cap_aim, watch.line, fallback, attitude_valid)
+            motion = competition_lines(search, pitch, cap_aim, watch.line, fallback, attitude_valid, camera_turning_fast(frame))
             footer_bottom = [] if args.competition else split_status(lines)[1]
             vis = vis.copy()
-            target_pitch = (fallback.target_pitch if fallback.active else
-                            _SETTLED_LOOK_DOWN_DEG if watch.line else
-                            -search.vote_rise if search.anchor is not None and not search.settled else None)
             target_text = (f'；目标俯仰 {target_pitch:+.1f} 度' if target_pitch is not None
                            else '；目标俯仰按动作提示调整')
             draw_motion_footer(vis, motion[0] + target_text, motion[1], footer_bottom)

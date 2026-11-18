@@ -761,13 +761,16 @@ def _upper_top_support(points, pixels, high, plane, shape):
     return keep
 
 
-def _rgb_cap_candidate(color_bgr, intr, plane, anchor, diagnostics):
+def _rgb_cap_candidate(color_bgr, intr, plane, anchor, diagnostics, depth=None, zmin=.05, zmax=1.2):
     """只确认相邻红蓝候选；允许截断，不产生体心或角度。"""
     masks = cap_color_masks(color_bgr)
     diagnostics.update(red=int(np.count_nonzero(masks[0])), blue=int(np.count_nonzero(masks[1])))
     if anchor is None:
         diagnostics["candidate"] = "no_anchor"
         return _empty_pixels()
+    best = None
+    best_score = -float("inf")
+    rejected = "no_adjacent_pair"
     # 先关联原始可见红蓝，再检查它们是否位于当前塔附近。
     # 不能先把掩膜裁成窄高度带，再要求裁剩的碎片构成完整面。
     max_gap = max(8, int(color_bgr.shape[0] * .12))
@@ -785,6 +788,34 @@ def _rgb_cap_candidate(color_bgr, intr, plane, anchor, diagnostics):
         if int(supported.sum()) < max(8, int(len(seam) * .35)):
             continue
         yy, xx = np.nonzero(component)
+        uv = np.column_stack([xx, yy])
+        hits = _at_tower_face(uv, intr, plane, anchor)
+        finite = np.isfinite(hits).all(axis=1)
+        if finite.sum() < 10:
+            rejected = "projection_insufficient"
+            continue
+        # 不改变白盒的0.45m宽关联容差；尺寸在完整红蓝连通块上核验。
+        local = hits[finite]
+        right = np.array([1., 0., 0.]) - plane.normal * plane.normal[0]
+        right /= np.linalg.norm(right)
+        width = float(np.ptp(np.percentile(local @ right, [3, 97])))
+        height = float(np.ptp(np.percentile(plane.signed_distance(local), [3, 97])))
+        # 容许透视、侧面、遮挡和分界噪声；上限超过200mm的两倍才拒绝。
+        if width > .44 or height > .40:
+            rejected = "size_mismatch"
+            continue
+        if depth is not None:
+            z = depth[yy, xx]
+            valid = np.isfinite(z) & (z > 0)
+            if valid.sum() >= max(12, int(len(z) * .15)):
+                measured = deproject_pixels(uv[valid], z[valid], intr)
+                foot = plane.project(np.asarray(anchor).reshape(1, 3))[0]
+                agree = (np.linalg.norm(plane.project(measured) - foot, axis=1) <= _NEAR_M)
+                agree &= (plane.signed_distance(measured) > .60) & (plane.signed_distance(measured) < 1.04)
+                agree &= (z[valid] >= zmin) & (z[valid] <= zmax)
+                if agree.mean() < .60:
+                    rejected = "depth_conflict"
+                    continue
         border = max(2, int(min(color_bgr.shape[:2]) * .005))
         edges = []
         if int(xx.min()) < border:
@@ -795,11 +826,23 @@ def _rgb_cap_candidate(color_bgr, intr, plane, anchor, diagnostics):
             edges.append("top")
         if int(yy.max()) >= color_bgr.shape[0] - border:
             edges.append("bottom")
-        diagnostics.update(candidate="visible", boundary_points=len(seam),
-                           boundary_supported=int(supported.sum()), clipped_edges=edges,
-                           partial=bool(edges) or int(supported.sum()) < .8 * len(seam))
-        return np.column_stack([xx, yy]).astype(int)
-    diagnostics["candidate"] = "no_adjacent_pair"
+        associated = width >= .05 and height >= .04 and supported.mean() >= .60
+        # 多个候选时选择离塔参照最近者，不依赖遍历顺序。
+        foot = plane.project(np.asarray(anchor).reshape(1, 3))[0]
+        offset = float(np.linalg.norm(np.median(plane.project(points[supported]), axis=0) - foot))
+        score = float(associated) * 2 - offset
+        if score > best_score:
+            best_score = score
+            best = (uv.astype(int), dict(candidate="visible", boundary_points=len(seam),
+                    boundary_supported=int(supported.sum()), clipped_edges=edges,
+                    partial=bool(edges) or int(supported.sum()) < .8 * len(seam),
+                    associated=bool(associated), projected_width_m=width, projected_height_m=height,
+                    anchor_offset_m=offset))
+    if best is not None:
+        diagnostics.update(best[1])
+        return best[0]
+    diagnostics["candidate"] = rejected
+    diagnostics["associated"] = False
     return _empty_pixels()
 
 
@@ -977,7 +1020,7 @@ def coarse_bands(
             cap_point = np.median(cap_points[band], axis=0)
             cap_uv = cap_pixels[band]
     # 无深度红蓝只作观察候选，不允许候选把层数改成 two_cap。
-    candidate_uv = _rgb_cap_candidate(color_bgr, intr, plane, found, rgb_debug)
+    candidate_uv = _rgb_cap_candidate(color_bgr, intr, plane, found, rgb_debug, depth, zmin, zmax)
     if not cap and len(candidate_uv):
         rgb_candidate = True
         cap_uv = candidate_uv
@@ -996,6 +1039,8 @@ def coarse_bands(
         "upper_uv": upper_uv,
         "cap_uv": cap_uv,
         "cap_rgb_candidate": rgb_candidate,
+        "cap_candidate_associated": bool(cap or (rgb_candidate and rgb_debug.get("associated", False))),
+        "cap_presence_confirmed": bool(cap),
         "cap_partial": bool(rgb_debug.get("partial", False)),
         "rgb_debug": rgb_debug,
     }

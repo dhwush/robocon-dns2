@@ -56,8 +56,16 @@ def encode(value, arrays, prefix):
 
 class DiagnosticRecorder:
     def __init__(self, directory, seconds, cfg, intr, camera_height, root):
-        self.path = Path(directory)
-        self.path.mkdir(parents=True, exist_ok=False)
+        requested = Path(directory)
+        self.path = requested
+        suffix = 0
+        while True:
+            try:
+                self.path.mkdir(parents=True, exist_ok=False)
+                break
+            except FileExistsError:
+                suffix += 1
+                self.path = requested.with_name(f"{requested.name}-{suffix}")
         self.seconds = float(seconds)
         self.start = None
         self.index = 0

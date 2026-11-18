@@ -7,6 +7,8 @@ field_width: 1.2
 depth_min: 0.05
 depth_max: 1.2
 # 深度流 848×480，最近大约 0.17 米。1280×720 大约 0.28 米以内没有深度。对齐到彩色后仍用彩色内参。
+color_width: 1280
+color_height: 720
 depth_width: 848
 depth_height: 480
 flying_pixel_m: 0.08
@@ -48,3 +50,8 @@ colors:
     hsv_low: [0, 0, 140]
     hsv_high: [180, 110, 255]
     front: false
+
+# 当前小车右前点为原点，X右/Y前/Z上；相机零位偏航与车头一致。
+camera_optical_center_m: [-0.211, 0.05, 0.669]
+# 相机水平时俯仰转轴到光心的车身坐标，未测量时按转轴经过光心。
+camera_pivot_to_optical_m: [0.0, 0.0, 0.0]
