@@ -141,6 +141,28 @@ def associated_upper(points, heights, flat, pixels, bands, foot, size, lower_ref
     return result
 
 
+def clear_upper_view(depth, intr, plane, foot, size):
+    """一层的直接判断需要实测空余空间；深度空洞不表示没有上层。"""
+    right = np.array([1., 0., 0.])
+    right -= plane.normal * float(right @ plane.normal)
+    norm = np.linalg.norm(right)
+    if norm < .2:
+        return False
+    right /= norm
+    points = np.array([foot + right * x + plane.normal * h
+                       for h in (.48, .56, .64, .69)
+                       for x in np.linspace(-size * .25, size * .25, 5)])
+    uv = project_points(points, intr)
+    if not np.isfinite(uv).all() or np.any(points[:, 2] <= .05):
+        return False
+    uv = np.rint(uv).astype(int)
+    if np.any(uv[:, 0] < 0) or np.any(uv[:, 0] >= intr.width) or np.any(uv[:, 1] < 0) or np.any(uv[:, 1] >= intr.height):
+        return False
+    z = depth[uv[:, 1], uv[:, 0]]
+    clear = np.isfinite(z) & (z > points[:, 2] + .08) & (z < 10.)
+    return bool(clear.mean() >= .8)
+
+
 @dataclass
 class TopFallback:
     timeout: float = 15.
@@ -224,10 +246,10 @@ class TopFallback:
         return self.lower_reference if self.lower_reference_count >= 3 else None
 
     def at_target(self, pitch):
-        """3度内到位；到位后5度内保持，避免边界附近反复换向。"""
+        """俯仰误差不超过3度即到位，边界内不再要求调整。"""
         if pitch is None or not np.isfinite(pitch) or self.target_pitch is None:
             return False
-        return abs(pitch - self.target_pitch) <= (5. if self.arrived else 3.)
+        return abs(pitch - self.target_pitch) <= 3.
 
     def scan_failure(self, now, reason, advance=False):
         self.pending, self.count = None, 0
@@ -419,6 +441,6 @@ class TopFallback:
         body = list(lines[:start])
         if body:
             body[0] = ('备用流程：俯视第一层顶面，独立判断白盒层数' if self.active
-                       else '先检查塔顶，返回低头检查后才判断白盒层数')
+                       else '先在当前视角确认层数和塔顶，证据不足再低头检查')
         label = '层数待确认；塔顶未确认' if self.layers is None else f'层数 {self.layers}（白盒）；' + self.result.split('，', 1)[1]
         return body + [label, self.instruction]

@@ -9,9 +9,9 @@ COLORS = [{'name':'white','hsv_low':[0,0,140],'hsv_high':[180,110,255]}]
 CFG = dict(cube_size=.35, colors=COLORS, depth_min=.05, depth_max=1.2, size_tolerance=.06)
 
 
-def scene(layers=1, offset=0.):
+def scene(layers=1, offset=0., pitch_deg=32., distance=.35):
     intr = intrinsics_for(320, 240)
-    angle = np.radians(32.)
+    angle = np.radians(pitch_deg)
     up = np.array([0., -np.cos(angle), -np.sin(angle)])
     forward = np.array([0., -np.sin(angle), np.cos(angle)])
     plane = Plane(up, -.669)
@@ -21,7 +21,7 @@ def scene(layers=1, offset=0.):
     origin = np.array([0.,0.,.669])
     nearest = np.full(xx.size, np.inf)
     for level in range(layers):
-        lo = np.array([-.175 + (offset if level else 0), .35, level*.35])
+        lo = np.array([-.175 + (offset if level else 0), distance, level*.35])
         hi = lo + .35
         with np.errstate(divide='ignore', invalid='ignore'):
             t0, t1 = (lo-origin)/directions, (hi-origin)/directions
@@ -34,8 +34,8 @@ def scene(layers=1, offset=0.):
     color = np.full((240,320,3),40,np.uint8)
     color[np.isfinite(depth)] = 210
     corners = np.array([np.array([x,0.,0.])+y*forward-.669*up
-                        for x,y in [(-.175,.35),(.175,.35),(.175,.70),(-.175,.70)]])
-    anchor = .35*forward-.669*up
+                        for x,y in [(-.175,distance),(.175,distance),(.175,distance+.35),(-.175,distance+.35)]])
+    anchor = distance*forward-.669*up
     return intr, plane, anchor, color, depth, corners
 
 
@@ -150,7 +150,7 @@ def test_live_loop_switches_after_timeout_and_shows_top_result(monkeypatch, head
     monkeypatch.setattr(view, 'coarse_bands', lambda *a, **k: dict(anchor=anchor,lower=True,
                            upper_white=False,cap=False,distance=.35,lower_uv=np.column_stack(np.where(np.isfinite(depth))[::-1])))
     monkeypatch.setattr(view, 'pitch_down_degrees', lambda *a: -6. if index[0] <= 1 else 32.)
-    monkeypatch.setattr(view, 'StackSearch', lambda: StackSearch(kind='one',settled=True,anchor=anchor.copy()))
+    monkeypatch.setattr(view, 'StackSearch', lambda: StackSearch(anchor=anchor.copy()))
     monkeypatch.setattr(StackSearch, 'update', lambda *a, **k: '')
     monkeypatch.setattr(view, 'paint', lambda color,bands,lines,*a: rendered.append(lines.copy()) or color)
     monkeypatch.setattr(view.cv2,'imshow',lambda *a: None)
@@ -403,7 +403,7 @@ def test_missing_depth_advances_bounded_scan_and_ssh_stops():
     assert fallback.scan_exhausted
     assert '白盒 1 层已确认' in fallback.instruction
     text = terminal_status(StackSearch(), visited[-1], None, fallback, True)
-    assert '角度已到达，停止俯仰和旋转' in text
+    assert '角度已到达，可以了，停止俯仰和旋转' in text
     assert '证据不足' not in text
     assert '顶块待确认' not in text
     assert '结果：白盒层数 1' in text
@@ -454,15 +454,15 @@ def test_dark_rgb_cannot_confirm_from_depth_alone():
 
 
 
-def test_arrival_holds_near_boundary_but_corrects_large_drift():
+def test_arrival_holds_inside_three_degrees_and_corrects_outside():
     fallback = TopFallback(active=True)
     update(fallback, 20., depth=scene()[4] * np.nan)
     target = fallback.target_pitch
     update(fallback, 20.1, pitch=target + 2.9, moving=True)
     assert fallback.arrived
-    update(fallback, 20.2, pitch=target + 4.9, moving=True)
-    assert fallback.arrived and fallback.at_target(target + 4.9)
-    update(fallback, 20.3, pitch=target + 5.1, moving=True)
+    update(fallback, 20.2, pitch=target + 3.0, moving=True)
+    assert fallback.arrived and fallback.at_target(target + 3.0)
+    update(fallback, 20.3, pitch=target + 3.01, moving=True)
     assert not fallback.arrived
 
 
@@ -625,3 +625,67 @@ def test_camera_rotation_keeps_history_in_current_camera_coordinates():
     assert np.allclose(fallback.reliable_lower(), rotation @ point)
     fallback.reorient(rotation.T)
     assert np.allclose(fallback.reliable_lower(), point)
+
+
+def run_direct_frame(flow, now, layers=2, missing_depth=False, far_upper=False):
+    from cube.stack_look import _cloud
+    from cube.detect import _white_pixels
+    intr, plane, anchor, color, depth, _ = scene(layers, pitch_deg=0., distance=1.)
+    points, heights, flat, pixels = _cloud(_white_pixels(color, COLORS), depth, intr, plane, .05, 1.2)
+    bands = dict(anchor=anchor, lower=True, distance=1., covers=True, cap=False,
+                 upper_white=layers == 2,
+                 lower_uv=pixels[(heights > .08) & (heights < .32)],
+                 upper_uv=pixels[(heights > .43) & (heights < .78)])
+    if far_upper:
+        depth = depth.copy()
+        uv = bands['upper_uv']
+        depth[uv[:, 1], uv[:, 0]] = 2.5
+    if missing_depth:
+        depth = depth * np.nan
+    raw_depth = np.where(np.isfinite(depth), depth, 3.)
+    if missing_depth:
+        raw_depth[:] = np.nan
+    flow.update_search(bands, 0., -plane.normal, True, color, depth, intr, plane, raw_depth)
+    spoken = flow.update_result(now, True, False, 0., color, depth, intr, plane,
+                               bands, None, None, None, None, False)
+    return spoken
+
+
+def test_old_style_two_layer_reports_before_any_low_view_or_timeout():
+    from view_tower import TowerFlow
+    flow = TowerFlow(CFG)
+    assert run_direct_frame(flow, 0.) is None
+    assert run_direct_frame(flow, .1) is None
+    assert run_direct_frame(flow, .2) == '识别完成 层数 2 没有顶块'
+    assert not flow.fallback.active and flow.fallback.scan_index == 0
+
+
+def test_direct_one_layer_requires_reliable_lower_and_clear_upper_space():
+    from view_tower import TowerFlow
+    flow = TowerFlow(CFG)
+    for i in range(6):
+        spoken = run_direct_frame(flow, i * .1, layers=1)
+    assert flow.watch.line == '识别完成 层数 1 没有顶块'
+    assert not flow.fallback.active
+
+
+@pytest.mark.parametrize('mode', ['depth_holes', 'far_upper'])
+def test_direct_layer_output_rejects_background_and_depth_holes(mode):
+    from view_tower import TowerFlow
+    flow = TowerFlow(CFG)
+    for i in range(6):
+        assert run_direct_frame(flow, i * .1, missing_depth=mode == 'depth_holes',
+                                far_upper=mode == 'far_upper') is None
+    assert flow.watch.line is None
+    assert not flow.search.settled
+
+
+def test_rejected_frame_breaks_direct_layer_consecutive_vote():
+    from view_tower import TowerFlow
+    flow = TowerFlow(CFG)
+    run_direct_frame(flow, 0.)
+    run_direct_frame(flow, .1)
+    run_direct_frame(flow, .2, missing_depth=True)
+    assert run_direct_frame(flow, .3) is None
+    assert run_direct_frame(flow, .4) is None
+    assert run_direct_frame(flow, .5) == '识别完成 层数 2 没有顶块'

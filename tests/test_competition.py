@@ -81,7 +81,7 @@ def test_ssh_status_is_compact_and_keeps_latest_result():
     text = terminal_status(search, 36.3, None, fallback, True, '白盒层数 2，顶块待确认')
     assert '当前俯仰：+36.3°' in text
     assert '预期俯仰：+37.7°' in text
-    assert '已到达，停止俯仰和旋转' in text
+    assert '已到达，可以了，停止俯仰和旋转' in text
     assert '结果：白盒层数 2，顶块待确认' in text
     assert '连续稳定' not in text and '上一轮' not in text
     fallback.active = False
@@ -101,3 +101,12 @@ def test_terminal_result_number_is_retained_until_next_result():
     text = terminal_status(search, 36., None, fallback, True)
     assert '结果：待确认' in text
     assert '第0次' not in text
+
+
+@pytest.mark.parametrize('layers', [1, 2])
+def test_direct_and_fallback_white_result_use_same_terminal_format(layers):
+    from view_tower import terminal_status
+    search = StackSearch()
+    direct = terminal_status(search, 0., f'识别完成 层数 {layers} 没有顶块', TopFallback(), True)
+    fallback = terminal_status(search, 0., None, TopFallback(active=True, layers=layers, saw_top_view=True), True)
+    assert direct.split(' | 结果：')[1] == fallback.split(' | 结果：')[1]

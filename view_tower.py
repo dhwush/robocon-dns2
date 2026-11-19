@@ -2,7 +2,7 @@
 
 左上角写为什么这么判、当前俯仰、白盒大概在哪。
 窗口最下面写层数、红蓝朝上的颜色、俯仰还要怎么变。俯仰保持也在这下面。
-在抬头位置保持 15 秒未看到顶块，改为提示低头检查第一层顶面露出面积和上层遮挡；连续 5 帧确认白盒层数后，保持俯仰并自动开启下一轮识别。
+在合适抬头视角按可靠证据直接确认层数；证据不足超过15秒时才低头检查顶面。
 近处的抬头按下层白的水平距离，黄线顶到画面上沿再抬一点。
 有顶块并且层数已经定了，再写把顶块留在画面里还要转的俯仰和旋转。已经在画面里就保持。贴边超过 3 度写成 6 度。
 青线是下层白，品红线是上层白，黄线是塔顶红蓝的轮廓。
@@ -11,9 +11,9 @@
 近处深度对不成平面时，白线是红蓝交界，橙线是方块外轮廓。黄线这时不画。体心仍交到离地 0.80 米。
 字直接写在画面上，不铺黑底。
 这座塔认完之后，窗口最下面按当前俯仰提示转到低头 48.8 度，误差不超过 3 度时提示停止。这是相对水平的角度，不按距离改。终端仍报层数、顶块颜色和最终方位。
-白盒层数只在先检查塔顶、再返回低头完成顶面检查后发布。有红蓝时要等体心和朝上的颜色一起稳定。
+白盒层数在合适视角按实测证据连续确认后直接发布；证据不足才启用低头顶面检查。有红蓝时要等体心和朝上的颜色一起稳定。
 绿框稳住满 10 秒仍分不清朝上的颜色，就用绿框上半区里更多的那一色。上沿出画还在抬头，这 10 秒照样计。绿框上半截已经出画时，看得见的是下色，朝上用另一色。
-有顶块时，报完返回低头 48.8 度后自动开启下一轮；无顶块时，返回低头确认白盒顶面和层数，保持俯仰自动开启下一轮。
+直接识别完成后返回低头48.8度开启下一轮；备用顶面检查完成后保持俯仰开启下一轮。
 一打开用第 3 档室内。按 1 到 5 可换：很亮、白天、室内、偏暗、很暗。第 1 档是原来的白天，第 5 档是原来的偏暗，第 2 档和第 4 档的亮度在相邻两档正中。按 q 或 Esc 退出。
 
     python view_tower.py
@@ -37,6 +37,7 @@ from PIL import Image, ImageDraw, ImageFont
 from tower_debug_window import DebugWindow
 from camera.source import RealSenseSource, color_lock_from_config
 from cube.aim import keep_in_frame
+from cube.detect import _white_pixels
 from cube.body_frame import calibrate_cap, body_point
 from cube.pose_projection import pose_matches_color
 from cube.cap_pose import (
@@ -56,11 +57,12 @@ from cube.cap_pose import (
 from cube.stack_look import (
     StackSearch,
     _QUIET_FRAMES,
+    _cloud,
     coarse_bands,
     pitch_down_degrees,
     relax_upper_white,
 )
-from cube.top_fallback import TopFallback
+from cube.top_fallback import TopFallback, associated_upper, clear_upper_view
 from ground.plane import Plane
 from main import GroundMemory, _prior_ground, clean_frame, load_config, selected_camera_height
 from view_cube_center import cube_wire_corners, draw_cube_edges, draw_center
@@ -425,7 +427,7 @@ def motion_guidance(search, pitch, finished, fallback, valid, moving=False, cap_
     if moving:
         return target, '停止俯仰和旋转，等待稳定'
     if fallback.layers is not None:
-        return target, '角度已到达，停止俯仰和旋转；保持当前俯仰'
+        return target, '角度已到达，可以了，停止俯仰和旋转；保持当前俯仰'
     if finished and not fallback.active:
         return target, settled_look_down_line(pitch)
     if cap_aim and not fallback.active:
@@ -435,7 +437,7 @@ def motion_guidance(search, pitch, finished, fallback, valid, moving=False, cap_
     tolerance = _PARK_TOLERANCE_DEG if finished and not fallback.active else 3.
     reached = fallback.at_target(pitch) if fallback.active else abs(target - pitch) <= tolerance
     if reached:
-        action = '角度已到达，停止俯仰和旋转'
+        action = '角度已到达，可以了，停止俯仰和旋转'
         if fallback.active and fallback.upper_count:
             action += f'；两层确认 {fallback.upper_count}/5 帧'
         elif fallback.active and fallback.upper_hold_used:
@@ -465,9 +467,20 @@ def terminal_status(search, pitch, finished, fallback, valid, previous_result=No
     """Compact SSH status: angle, target, movement and latest confirmed result."""
     result = (fallback.result if fallback.layers is not None else finished or previous_result)
     result = result or '待确认'
+    result = {'识别完成 层数 1 没有顶块': '白盒层数 1，没有顶块',
+              '识别完成 层数 2 没有顶块': '白盒层数 2，没有顶块'}.get(result, result)
     result_label = f'第{result_number}次识别结果' if result_number is not None else '结果'
     current = f'{pitch:+.1f}°' if valid and pitch is not None and np.isfinite(pitch) else '无效'
     target, action = motion_guidance(search, pitch, finished, fallback, valid, moving, cap_aim)
+    # Match the latest terminal wording without changing recognition or window guidance.
+    if (valid and pitch is not None and np.isfinite(pitch) and not moving
+            and not fallback.active and fallback.layers is None and not finished and not cap_aim):
+        if search.pending == 'two' and search.quiet:
+            target = pitch
+            action = f'可以了，停止俯仰和旋转；两层确认 {search.quiet}/3 帧'
+        elif target is None:
+            action = ('保持当前俯仰，将白盒移入画面中央；旋转停止' if pitch >= 30.
+                      else '将下层白盒移入画面中央，调整距离；旋转停止')
     expected = f'{target:+.1f}°' if target is not None and np.isfinite(target) else '待确定'
     return f'当前俯仰：{current} | 预期俯仰：{expected} | 动作：{action} | {result_label}：{result}'
 
@@ -738,19 +751,52 @@ class TowerFlow:
                 and self.watch.depart(now, self.search, bands, moving=moving,
                                       tracking=self.fallback.active))
 
-    def update_search(self, bands, pitch, gravity, valid):
-        if valid:
-            # 普通高度带只供定位和找塔顶；层数仍由返回后的顶面检查确认。
-            cap_search = dict(bands, upper_white=False, covers=False)
-            self.search.update([], cap_search, bands.get("distance"),
-                               float(self.cfg["cube_size"]), pitch, gravity)
-        if not self.fallback.cap_confirmed and (bands.get("cap") or bands.get("cap_candidate_associated")):
-            self.search.kind = "two_cap"
+    def update_search(self, bands, pitch, gravity, valid, color=None, depth=None,
+                      intr=None, plane=None, raw_depth=None, moving=False):
+        if not valid or moving:
+            self.search.pending, self.search.quiet = None, 0
+            return
+        info = dict(bands, upper_white=False, covers=False)
+        anchor = self.search.anchor if self.search.anchor is not None else bands.get('anchor')
+        if plane is not None and anchor is not None and depth is not None and intr is not None:
+            foot = plane.project(np.asarray(anchor).reshape(1, 3))[0]
+            size = float(self.cfg['cube_size'])
+            if bands.get('upper_white') and color is not None:
+                points, heights, flat, pixels = _cloud(
+                    _white_pixels(color, self.cfg['colors']), depth, intr, plane,
+                    float(self.cfg['depth_min']), float(self.cfg['depth_max']))
+                upper = associated_upper(points, heights, flat, pixels, bands, foot, size,
+                                         self.fallback.reliable_lower())
+                info['upper_white'] = upper['layers'] == 2
+                bands['direct_upper_reason'] = upper['reason']
+            # 有待排除的上层或红蓝时，不能把拒绝候选误当成一层证据。
+            if (bands.get('covers') and not bands.get('upper_white')
+                    and not bands.get('cap') and not bands.get('cap_rgb_candidate')
+                    and self.fallback.reliable_lower() is not None
+                    and np.linalg.norm(self.fallback.reliable_lower() - foot) <= size * .35):
+                info['covers'] = clear_upper_view(
+                    depth if raw_depth is None else raw_depth, intr, plane, foot, size)
+        if not info.get('cap') and (info.get('cap_rgb_candidate') or not (info['upper_white'] or info['covers'])):
+            self.search.pending, self.search.quiet = None, 0
+        self.search.update([], info, bands.get('distance'),
+                           float(self.cfg['cube_size']), pitch, gravity)
+        if not self.fallback.cap_confirmed and (bands.get('cap') or bands.get('cap_candidate_associated')):
+            self.search.kind = 'two_cap'
 
     def update_result(self, now, valid, moving, pitch, color, depth, intr, plane,
                       bands, measured, world, yaw, tint, candidate_unmeasured):
         search, fallback, watch = self.search, self.fallback, self.watch
         was_fallback = fallback.active
+        # 恢复旧版直接输出入口；白盒层数无需等待塔顶位姿，也无需先低头。
+        if (valid and not moving and not candidate_unmeasured
+                and search.settled and search.kind in ('one', 'two')
+                and not bands.get('cap') and not bands.get('cap_candidate_associated')
+                and not bands.get('cap_rgb_candidate')):
+            spoken = watch.offer(search, world, yaw, tint)
+            if watch.line:
+                fallback.active = False
+                fallback.layers = None
+                return spoken
         if not watch.line:
             fallback.update(now, search.anchor, world is not None, valid, moving,
                             pitch, color, depth, intr, plane, self.cfg, bands=bands,
@@ -1115,7 +1161,9 @@ def main() -> None:
                     float(cfg["depth_max"]),
                     None,
                 )
-            flow.update_search(bands, pitch, cleaned.gravity, attitude_valid)
+            flow.update_search(bands, pitch, cleaned.gravity, attitude_valid,
+                               cleaned.color, cleaned.depth, intr, plane, frame.depth,
+                               camera_turning_fast(frame))
             cap_draw = None
             cap_reason = None
             cap_yaw = None
@@ -1330,7 +1378,8 @@ def main() -> None:
                 cap_unmeasured=candidate_unmeasured,
                 mount_cfg=cfg,
             )
-            lines = fallback.display(lines)
+            if not watch.line:
+                lines = fallback.display(lines)
             lines = park_result(lines, watch.line if attitude_valid and not fallback.active else None, pitch)
             target_pitch, action = motion_guidance(
                 search, pitch, watch.line, fallback, attitude_valid, camera_turning_fast(frame), cap_aim)
@@ -1380,12 +1429,11 @@ def main() -> None:
                     lines[0:0] = diagnostics.lines(diagnostic_state)
                 elif diagnostics.finished or diagnostics.error:
                     lines.insert(0, f"诊断采集{'失败' if diagnostics.error else '结束'}，已保存 {diagnostics.index} 帧")
-            if args.headless or diagnostics is not None:
-                if now - last_terminal >= 1.0 or cycle.restart:
-                    print(terminal_status(search, pitch, watch.line, fallback, attitude_valid,
-                                          previous_result, camera_turning_fast(frame), cap_aim,
-                                          result_count or None), flush=True)
-                    last_terminal = now
+            if now - last_terminal >= 1.0 or cycle.restart:
+                print(terminal_status(search, pitch, watch.line, fallback, attitude_valid,
+                                      previous_result, camera_turning_fast(frame), cap_aim,
+                                      result_count or None), flush=True)
+                last_terminal = now
             if args.headless:
                 # 必须在任何绘图、Qt窗口、waitKey调用之前分流；xcb错误会直接中止进程。
                 fps = 1.0 / max(now - last, 1e-3)

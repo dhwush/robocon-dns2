@@ -25,10 +25,10 @@ def test_window_and_terminal_give_same_action(pitch, valid, moving, complete):
         assert lines[1].startswith('停止俯仰和旋转')
 
 
-def test_arrival_hysteresis_is_used_in_both_displays():
+def test_three_degree_deadband_is_used_in_both_displays():
     fallback = TopFallback(active=True, target_pitch=32., arrived=True)
     search = StackSearch()
-    for pitch in (28., 36.):
+    for pitch in (29., 35.):
         assert '停止俯仰和旋转' in competition_lines(search, pitch, None, None, fallback, True)[1]
         assert '停止俯仰和旋转' in terminal_status(search, pitch, None, fallback, True)
 
@@ -78,3 +78,17 @@ def test_scan_preserves_angles_and_reduces_largest_reverse_move():
     assert sorted(targets) == [24., 32., 40., 48., 56.]
     assert max(abs(b - a) for a, b in zip(targets, targets[1:])) == 16.
     assert not fallback.scan_exhausted and fallback.layers is None
+
+
+@pytest.mark.parametrize('active', [False, True])
+@pytest.mark.parametrize('offset', [-3.01, -3., 0., 3., 3.01])
+def test_pitch_deadband_reports_ready_only_within_three_degrees(active, offset):
+    search = StackSearch(anchor=np.array([0., .3, .8]))
+    fallback = TopFallback(active=active, target_pitch=32., top_target_pitch=32., arrived=True)
+    pitch = 32. + offset
+    action = competition_lines(search, pitch, None, None, fallback, True)[1]
+    terminal = terminal_status(search, pitch, None, fallback, True)
+    assert ('可以了' in action) == (abs(offset) <= 3.)
+    assert action in terminal
+    if abs(offset) > 3.:
+        assert ('低头' if offset < 0 else '抬头') in action
