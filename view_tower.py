@@ -787,11 +787,17 @@ class TowerFlow:
                       bands, measured, world, yaw, tint, candidate_unmeasured):
         search, fallback, watch = self.search, self.fallback, self.watch
         was_fallback = fallback.active
+        # The restored white-box path must not outrun yesterday's cap measurement.
+        # A measured/fused cap remains cap evidence even when this frame's band is empty.
+        cap_evidence = bool(bands.get('cap') or bands.get('cap_candidate_associated')
+                            or bands.get('cap_presence_confirmed')
+                            or measured is not None or world is not None)
+        if valid and not moving and (measured is not None or world is not None):
+            search.kind = 'two_cap'
         # 恢复旧版直接输出入口；白盒层数无需等待塔顶位姿，也无需先低头。
         if (valid and not moving and not candidate_unmeasured
                 and search.settled and search.kind in ('one', 'two')
-                and not bands.get('cap') and not bands.get('cap_candidate_associated')
-                and not bands.get('cap_rgb_candidate')):
+                and not cap_evidence and not bands.get('cap_rgb_candidate')):
             spoken = watch.offer(search, world, yaw, tint)
             if watch.line:
                 fallback.active = False

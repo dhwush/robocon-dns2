@@ -57,3 +57,23 @@ def test_departure_does_not_clear_target_during_protected_states(monkeypatch, bl
         pytest.fail('protected state must not run departure detection')
     monkeypatch.setattr(flow.watch, 'depart', unexpected)
     assert not flow.target_departed(1., {}, blocked_by != 'invalid', False)
+
+
+@pytest.mark.parametrize('evidence', ['presence', 'measured', 'world'])
+def test_latest_cap_evidence_precedes_restored_direct_white_result(monkeypatch, evidence):
+    flow = TowerFlow(load_config('config/default.yaml'))
+    flow.search.kind = 'two'
+    flow.search.settled = True
+    monkeypatch.setattr(flow.fallback, 'update', lambda *args, **kwargs: None)
+    bands = {'cap_presence_confirmed': evidence == 'presence'}
+    measured = object() if evidence == 'measured' else None
+    world = np.array([.1,.8,.8]) if evidence == 'world' else None
+    spoken = flow.update_result(1., True, False, 0., None, None, None, None,
+                                bands, measured, world, 0., 'red', False)
+    if evidence == 'world':
+        assert flow.search.kind == 'two_cap'
+        assert spoken is not None and '红' in spoken
+    else:
+        assert spoken is None and flow.watch.line is None
+    if spoken:
+        assert '没有顶块' not in spoken
